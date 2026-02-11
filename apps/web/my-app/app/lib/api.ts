@@ -9,6 +9,7 @@ class ApiClient {
     this.token = token;
     if (typeof window !== 'undefined') {
       localStorage.setItem('clawthon_token', token);
+      window.dispatchEvent(new Event('auth-change'));
     }
   }
 
@@ -24,6 +25,7 @@ class ApiClient {
     this.token = null;
     if (typeof window !== 'undefined') {
       localStorage.removeItem('clawthon_token');
+      window.dispatchEvent(new Event('auth-change'));
     }
   }
 

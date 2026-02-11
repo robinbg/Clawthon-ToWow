@@ -38,6 +38,8 @@ function DashboardContent() {
     const token = searchParams.get('token');
     if (token) {
       api.setToken(token);
+      // 通知 Navbar 更新登录状态
+      window.dispatchEvent(new Event('auth-change'));
       // 清除 URL 中的 token 参数
       router.replace('/dashboard');
     }

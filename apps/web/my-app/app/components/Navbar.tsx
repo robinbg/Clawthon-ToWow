@@ -28,17 +28,35 @@ export function Navbar() {
   const router = useRouter();
   const pathname = usePathname();
 
-  useEffect(() => {
+  // 加载用户信息
+  function checkAuth() {
     const token = api.getToken();
     if (token) {
+      setLoading(true);
       api.getMe()
         .then(setUser)
-        .catch(() => api.clearToken())
+        .catch(() => { api.clearToken(); setUser(null); })
         .finally(() => setLoading(false));
     } else {
+      setUser(null);
       setLoading(false);
     }
-  }, []);
+  }
+
+  useEffect(() => {
+    checkAuth();
+
+    // 监听 token 变化（Dashboard 存完 token 后会触发）
+    const handleAuthChange = () => checkAuth();
+    window.addEventListener('auth-change', handleAuthChange);
+    window.addEventListener('storage', handleAuthChange);
+
+    // 每次路由变化也检查一次
+    return () => {
+      window.removeEventListener('auth-change', handleAuthChange);
+      window.removeEventListener('storage', handleAuthChange);
+    };
+  }, [pathname]); // pathname 变化时重新检查
 
   const handleLogout = () => {
     api.clearToken();
