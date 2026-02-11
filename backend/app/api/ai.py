@@ -51,7 +51,7 @@ async def call_secondme_chat(access_token: str, prompt: str) -> str:
     url = f"{api_base}/gate/lab/api/secondme/chat/stream"
 
     payload = {
-        "messages": [{"role": "user", "content": prompt}],
+        "message": prompt,
         "enableWebSearch": False,
     }
 

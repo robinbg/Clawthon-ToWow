@@ -8,8 +8,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
-import { Settings, Zap, TrendingUp, Save, User as UserIcon } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Settings, Zap, TrendingUp, Save, User as UserIcon, AlertTriangle, ShieldAlert } from 'lucide-react';
 import type { User } from '@/app/types';
 
 export default function SettingsPage() {
@@ -26,9 +26,9 @@ export default function SettingsPage() {
   const [autoInvestEnabled, setAutoInvestEnabled] = useState(false);
   const [autoInvestThreshold, setAutoInvestThreshold] = useState(100);
 
-  // Profile form state
-  const [name, setName] = useState('');
-  const [bio, setBio] = useState('');
+  // Warning dialog state
+  const [showSpendWarning, setShowSpendWarning] = useState(false);
+  const [showInvestWarning, setShowInvestWarning] = useState(false);
 
   useEffect(() => {
     const token = api.getToken();
@@ -48,13 +48,39 @@ export default function SettingsPage() {
       setAutoSpendDailyLimit(userData.settings.auto_spend_daily_limit);
       setAutoInvestEnabled(userData.settings.auto_invest_enabled);
       setAutoInvestThreshold(userData.settings.auto_invest_threshold);
-      setName(userData.name || '');
-      setBio(userData.bio || '');
     } catch {
       router.push('/');
     } finally {
       setLoading(false);
     }
+  }
+
+  function handleSpendToggle() {
+    if (!autoSpendEnabled) {
+      // 要开启 → 弹警告
+      setShowSpendWarning(true);
+    } else {
+      // 关闭不需要警告
+      setAutoSpendEnabled(false);
+    }
+  }
+
+  function confirmSpendEnable() {
+    setAutoSpendEnabled(true);
+    setShowSpendWarning(false);
+  }
+
+  function handleInvestToggle() {
+    if (!autoInvestEnabled) {
+      setShowInvestWarning(true);
+    } else {
+      setAutoInvestEnabled(false);
+    }
+  }
+
+  function confirmInvestEnable() {
+    setAutoInvestEnabled(true);
+    setShowInvestWarning(false);
   }
 
   async function saveSettings() {
@@ -133,11 +159,19 @@ export default function SettingsPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
-              <Label>启用自动消费</Label>
+              <div>
+                <Label>启用自动消费</Label>
+                {autoSpendEnabled && (
+                  <p className="text-xs text-amber-600 flex items-center gap-1 mt-1">
+                    <AlertTriangle className="h-3 w-3" />
+                    已开启：Agent 会在阈值内自动花费你的 CP
+                  </p>
+                )}
+              </div>
               <button
-                onClick={() => setAutoSpendEnabled(!autoSpendEnabled)}
+                onClick={handleSpendToggle}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  autoSpendEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                  autoSpendEnabled ? 'bg-amber-500' : 'bg-gray-300'
                 }`}
               >
                 <span
@@ -148,6 +182,17 @@ export default function SettingsPage() {
               </button>
             </div>
 
+            {autoSpendEnabled && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                <p className="font-medium flex items-center gap-1">
+                  <AlertTriangle className="h-4 w-4" /> 注意
+                </p>
+                <p className="mt-1">
+                  开启后，当 Agent 申请消费且满足以下条件时，系统将 <strong>自动从你的 CP 余额中扣款</strong>，无需你手动审批。
+                </p>
+              </div>
+            )}
+
             <div>
               <Label htmlFor="spend-threshold">单笔自动支付阈值 (CP)</Label>
               <Input
@@ -157,7 +202,7 @@ export default function SettingsPage() {
                 onChange={(e) => setAutoSpendThreshold(Number(e.target.value))}
                 disabled={!autoSpendEnabled}
               />
-              <p className="text-xs text-gray-500 mt-1">单笔 ≤ 此金额时自动批准</p>
+              <p className="text-xs text-gray-500 mt-1">单笔 ≤ 此金额时自动批准，超出仍需手动审批</p>
             </div>
 
             <div>
@@ -169,7 +214,7 @@ export default function SettingsPage() {
                 onChange={(e) => setAutoSpendDailyLimit(Number(e.target.value))}
                 disabled={!autoSpendEnabled}
               />
-              <p className="text-xs text-gray-500 mt-1">当日累计自动支付不超过此金额</p>
+              <p className="text-xs text-gray-500 mt-1">当日累计自动支付不超过此金额，超限后当日所有消费都需手动审批</p>
             </div>
           </CardContent>
         </Card>
@@ -187,11 +232,19 @@ export default function SettingsPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
-              <Label>启用自动投资</Label>
+              <div>
+                <Label>启用自动投资</Label>
+                {autoInvestEnabled && (
+                  <p className="text-xs text-red-600 flex items-center gap-1 mt-1">
+                    <ShieldAlert className="h-3 w-3" />
+                    已开启：Agent 会在阈值内自动投资你的 CP
+                  </p>
+                )}
+              </div>
               <button
-                onClick={() => setAutoInvestEnabled(!autoInvestEnabled)}
+                onClick={handleInvestToggle}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  autoInvestEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                  autoInvestEnabled ? 'bg-red-500' : 'bg-gray-300'
                 }`}
               >
                 <span
@@ -202,6 +255,18 @@ export default function SettingsPage() {
               </button>
             </div>
 
+            {autoInvestEnabled && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-800">
+                <p className="font-medium flex items-center gap-1">
+                  <ShieldAlert className="h-4 w-4" /> 高风险提醒
+                </p>
+                <p className="mt-1">
+                  开启后，Agent 将 <strong>自动使用你的 CP 进行投资</strong>。投资有风险，自动模式下你将无法逐笔审核。
+                  请确保阈值设置合理。
+                </p>
+              </div>
+            )}
+
             <div>
               <Label htmlFor="invest-threshold">单笔自动投资阈值 (CP)</Label>
               <Input
@@ -211,7 +276,7 @@ export default function SettingsPage() {
                 onChange={(e) => setAutoInvestThreshold(Number(e.target.value))}
                 disabled={!autoInvestEnabled}
               />
-              <p className="text-xs text-gray-500 mt-1">投资金额 ≤ 此值且开启自动投资时，Agent 自动执行</p>
+              <p className="text-xs text-gray-500 mt-1">投资金额 ≤ 此值时 Agent 自动执行，超出仍需手动审批</p>
             </div>
           </CardContent>
         </Card>
@@ -227,6 +292,92 @@ export default function SettingsPage() {
           <p className="mt-3 text-center text-sm">{message}</p>
         )}
       </div>
+
+      {/* 自动消费警告弹窗 */}
+      <Dialog open={showSpendWarning} onOpenChange={setShowSpendWarning}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-amber-600">
+              <AlertTriangle className="h-5 w-5" />
+              确认开启自动消费？
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm">
+              <p className="font-medium text-amber-800 mb-2">开启自动消费意味着：</p>
+              <ul className="space-y-2 text-amber-700">
+                <li className="flex items-start gap-2">
+                  <span className="mt-0.5">⚡</span>
+                  <span>Agent 使用其他 Agent 的产品/服务时，<strong>不再需要你手动审批</strong></span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="mt-0.5">💰</span>
+                  <span>单笔 ≤ {autoSpendThreshold} CP 且日累计 ≤ {autoSpendDailyLimit} CP 的消费将<strong>自动从余额扣除</strong></span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="mt-0.5">📝</span>
+                  <span>所有自动消费仍会记录在交易记录中，你可以随时查看</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="mt-0.5">🔒</span>
+                  <span>超过阈值的消费仍然需要你手动审批</span>
+                </li>
+              </ul>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setShowSpendWarning(false)} className="flex-1">
+                取消
+              </Button>
+              <Button onClick={confirmSpendEnable} className="flex-1 bg-amber-500 hover:bg-amber-600">
+                我了解风险，确认开启
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 自动投资警告弹窗 */}
+      <Dialog open={showInvestWarning} onOpenChange={setShowInvestWarning}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-600">
+              <ShieldAlert className="h-5 w-5" />
+              确认开启自动投资？
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm">
+              <p className="font-medium text-red-800 mb-2">⚠️ 高风险操作提醒：</p>
+              <ul className="space-y-2 text-red-700">
+                <li className="flex items-start gap-2">
+                  <span className="mt-0.5">📊</span>
+                  <span>Agent 将<strong>自动使用你的 CP 进行投资</strong>，投资有风险</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="mt-0.5">💸</span>
+                  <span>单笔 ≤ {autoInvestThreshold} CP 的投资将<strong>直接执行，无需审批</strong></span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="mt-0.5">📉</span>
+                  <span>投资的项目可能估值下跌，<strong>无法保证收益</strong></span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="mt-0.5">🔒</span>
+                  <span>你可以随时关闭此选项，超过阈值的投资仍需手动审批</span>
+                </li>
+              </ul>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setShowInvestWarning(false)} className="flex-1">
+                取消
+              </Button>
+              <Button onClick={confirmInvestEnable} className="flex-1 bg-red-500 hover:bg-red-600 text-white">
+                我了解风险，确认开启
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
