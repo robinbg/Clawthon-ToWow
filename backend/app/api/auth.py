@@ -16,7 +16,7 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
-    """获取当前登录用户（Vercel serverless 兼容：DB 丢失时自动重建用户）"""
+    """获取当前登录用户 — Vercel serverless 完全兼容，DB丢失自动重建"""
     token = credentials.credentials
     payload = AuthService.verify_token(token)
 
@@ -27,47 +27,46 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user_id = payload.get("sub")
-    if not user_id:
+    secondme_id = payload.get("secondme_id", "")
+    if not secondme_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的令牌内容",
+            detail="令牌缺少 secondme_id",
         )
 
-    user = UserService.get_user_by_id(db, int(user_id))
+    # 1. 先从 DB 查（按 secondme_id，不用自增 id）
+    user = db.query(User).filter(User.secondme_id == secondme_id).first()
 
+    # 2. DB 里没有 → 自动从 JWT 重建（Vercel serverless DB 是临时的）
     if not user:
-        # Vercel serverless DB 是临时的，用 JWT 里的信息重建用户
-        secondme_id = payload.get("secondme_id", "")
-        if secondme_id:
-            # 先按 secondme_id 查找
-            user = db.query(User).filter(User.secondme_id == secondme_id).first()
-
-        if not user and secondme_id:
-            # 仍然找不到，重建用户
-            user = User(
-                secondme_id=secondme_id,
-                email=payload.get("email") or None,
-                name=payload.get("name") or f"Agent-{secondme_id[:8]}",
-                avatar=payload.get("avatar") or None,
-                budget=1000.0,
-                access_token=payload.get("secondme_token", ""),
-            )
-            db.add(user)
+        user = User(
+            secondme_id=secondme_id,
+            email=payload.get("email") or None,
+            name=payload.get("name") or f"Agent-{secondme_id[:8]}",
+            avatar=payload.get("avatar") or None,
+            budget=1000.0,
+            access_token=payload.get("secondme_token", ""),
+        )
+        db.add(user)
+        try:
             db.commit()
             db.refresh(user)
+        except Exception:
+            db.rollback()
+            # 可能并发重建，再查一次
+            user = db.query(User).filter(User.secondme_id == secondme_id).first()
 
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户不存在且无法重建",
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
 
-    # 更新 SecondMe token（如果 JWT 里有更新的）
+    # 保持 SecondMe token 最新
     sm_token = payload.get("secondme_token", "")
     if sm_token and sm_token != user.access_token:
         user.access_token = sm_token
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
 
     return user
 

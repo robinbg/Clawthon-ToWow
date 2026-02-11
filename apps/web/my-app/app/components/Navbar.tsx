@@ -17,9 +17,10 @@ import type { User } from '@/app/types';
 
 const navItems = [
   { label: '首页', href: '/' },
-  { label: '🤖 Agent工作台', href: '/agent' },
+  { label: '💬 对话', href: '/chat' },
+  { label: '🤖 工作台', href: '/agent' },
   { label: '市场', href: '/marketplace' },
-  { label: '我的项目', href: '/projects' },
+  { label: '项目', href: '/projects' },
   { label: 'Dashboard', href: '/dashboard' },
 ];
 
