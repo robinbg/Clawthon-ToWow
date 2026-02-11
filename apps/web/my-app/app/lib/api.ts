@@ -155,6 +155,31 @@ class ApiClient {
       body: JSON.stringify(data),
     });
   }
+
+  // AI 决策
+  async generateSpendReason(targetProjectId: number): Promise<{
+    reason: string;
+    expected_return: string;
+    risk: string;
+    recommended_action: string;
+  }> {
+    return this.request('/ai/generate-spend-reason', {
+      method: 'POST',
+      body: JSON.stringify({ target_project_id: targetProjectId }),
+    });
+  }
+
+  async generateInvestReason(projectId: number, amount: number): Promise<{
+    reason: string;
+    expected_roi: number;
+    risk_level: string;
+    recommended_action: string;
+  }> {
+    return this.request('/ai/generate-invest-reason', {
+      method: 'POST',
+      body: JSON.stringify({ project_id: projectId, amount }),
+    });
+  }
 }
 
 export const api = new ApiClient();

@@ -156,11 +156,70 @@ function ProductCard({ product, type }: { product: Project; type: string }) {
   const [showInvest, setShowInvest] = useState(false);
   const [reason, setReason] = useState('');
   const [expectedReturn, setExpectedReturn] = useState('');
+  const [risk, setRisk] = useState('');
+  const [recommendedAction, setRecommendedAction] = useState('');
   const [investAmount, setInvestAmount] = useState('');
   const [investReason, setInvestReason] = useState('');
   const [expectedRoi, setExpectedRoi] = useState('');
+  const [investRisk, setInvestRisk] = useState('');
+  const [investAction, setInvestAction] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
   const [result, setResult] = useState('');
+
+  // 打开消费弹窗时，AI 自动生成理由
+  async function openSpendDialog() {
+    setShowSpend(true);
+    setAiLoading(true);
+    setReason('');
+    setExpectedReturn('');
+    setRisk('');
+    setResult('');
+    try {
+      const ai = await api.generateSpendReason(product.id);
+      setReason(ai.reason);
+      setExpectedReturn(ai.expected_return);
+      setRisk(ai.risk);
+      setRecommendedAction(ai.recommended_action);
+    } catch {
+      // AI 失败时用默认值
+      setReason(`使用「${product.name}」提升效率`);
+      setExpectedReturn(`预计节省约 ${((product.price_per_use || 0) * 1.5).toFixed(1)} CP`);
+      setRisk('低风险');
+      setRecommendedAction('approve');
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  // 打开投资弹窗时，预填金额后 AI 自动生成建议
+  async function openInvestDialog() {
+    setShowInvest(true);
+    setInvestAmount('');
+    setInvestReason('');
+    setExpectedRoi('');
+    setInvestRisk('');
+    setResult('');
+  }
+
+  async function generateInvestAI() {
+    if (!investAmount || Number(investAmount) <= 0) return;
+    setAiLoading(true);
+    try {
+      const ai = await api.generateInvestReason(product.id, Number(investAmount));
+      setInvestReason(ai.reason);
+      setExpectedRoi(String(ai.expected_roi));
+      setInvestRisk(ai.risk_level);
+      setInvestAction(ai.recommended_action);
+    } catch {
+      setInvestReason(`投资「${product.name}」获取股权`);
+      setExpectedRoi('20');
+      setInvestRisk('medium');
+      setInvestAction('cautious');
+    } finally {
+      setAiLoading(false);
+    }
+  }
 
   async function handleSpend() {
     setSubmitting(true);
@@ -169,8 +228,9 @@ function ProductCard({ product, type }: { product: Project; type: string }) {
       const res = await api.createSpendingRequest({
         target_project_id: product.id,
         amount: product.price_per_use || 0,
-        reason: reason || '使用该服务',
-        expected_return: expectedReturn || '提升效率',
+        reason: reason,
+        expected_return: expectedReturn,
+        risk: risk,
       });
       setResult(`✅ ${res.message}`);
       setTimeout(() => { setShowSpend(false); setResult(''); }, 2000);
@@ -188,9 +248,9 @@ function ProductCard({ product, type }: { product: Project; type: string }) {
       const res: any = await api.createInvestment({
         project_id: product.id,
         amount: Number(investAmount),
-        investment_reason: investReason || '看好该项目',
+        investment_reason: investReason,
         expected_roi: Number(expectedRoi) || 20,
-        risk_level: 'medium',
+        risk_level: investRisk || 'medium',
       });
       setResult(`✅ ${res.message || '投资成功'}`);
       setTimeout(() => { setShowInvest(false); setResult(''); }, 2000);
@@ -246,16 +306,16 @@ function ProductCard({ product, type }: { product: Project; type: string }) {
 
             <div className="pt-3 flex gap-2">
               {isAgentProduct ? (
-                <Button className="flex-1" onClick={() => setShowSpend(true)}
+                <Button className="flex-1" onClick={openSpendDialog}
                   disabled={!product.price_per_use}>
                   申请使用
                 </Button>
               ) : (
-                <Button className="flex-1" variant="outline" onClick={() => setShowInvest(true)}>
+                <Button className="flex-1" variant="outline" onClick={openInvestDialog}>
                   查看详情
                 </Button>
               )}
-              <Button variant="outline" size="icon" onClick={() => setShowInvest(true)} title="投资">
+              <Button variant="outline" size="icon" onClick={openInvestDialog} title="投资">
                 <TrendingUp className="h-4 w-4" />
               </Button>
             </div>
@@ -263,67 +323,100 @@ function ProductCard({ product, type }: { product: Project; type: string }) {
         </CardContent>
       </Card>
 
-      {/* 申请使用 Dialog */}
+      {/* 申请使用 Dialog — AI 自动生成理由 */}
       <Dialog open={showSpend} onOpenChange={setShowSpend}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>申请使用 · {product.name}</DialogTitle>
+            <DialogTitle>🤖 AI 消费决策 · {product.name}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
-            <div className="bg-gray-50 rounded p-3 text-sm">
-              <p>价格：<strong>{product.price_per_use} CP</strong> / 次</p>
-              <p className="text-gray-500 mt-1">消费将从你的 CP 余额中扣除</p>
+            <div className="bg-blue-50 rounded p-3 text-sm border border-blue-200">
+              <p className="font-medium text-blue-800">价格：{product.price_per_use} CP / 次</p>
             </div>
-            <div>
-              <Label>使用理由</Label>
-              <Input value={reason} onChange={(e) => setReason(e.target.value)}
-                placeholder="为什么需要这个服务？" />
-            </div>
-            <div>
-              <Label>预期收益</Label>
-              <Input value={expectedReturn} onChange={(e) => setExpectedReturn(e.target.value)}
-                placeholder="预计带来什么价值？" />
-            </div>
+
+            {aiLoading ? (
+              <div className="text-center py-6">
+                <div className="animate-spin h-6 w-6 border-2 border-blue-600 border-t-transparent rounded-full mx-auto mb-2" />
+                <p className="text-sm text-gray-500">AI 正在分析...</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="bg-gray-50 rounded p-3 space-y-2 text-sm">
+                  <p><strong>📋 理由：</strong>{reason}</p>
+                  <p><strong>📈 预期收益：</strong>{expectedReturn}</p>
+                  <p><strong>⚠️ 风险：</strong>{risk}</p>
+                  <p><strong>🎯 AI 建议：</strong>
+                    <span className={recommendedAction === 'approve' ? 'text-green-600 font-medium' : recommendedAction === 'reject' ? 'text-red-600 font-medium' : 'text-yellow-600 font-medium'}>
+                      {recommendedAction === 'approve' ? '✅ 建议批准' : recommendedAction === 'reject' ? '❌ 建议拒绝' : '⚡ 建议谨慎'}
+                    </span>
+                  </p>
+                </div>
+              </div>
+            )}
+
             {result && <p className="text-sm">{result}</p>}
-            <Button onClick={handleSpend} disabled={submitting} className="w-full">
-              {submitting ? '提交中...' : `确认支付 ${product.price_per_use} CP`}
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setShowSpend(false)} className="flex-1">
+                取消
+              </Button>
+              <Button onClick={handleSpend} disabled={submitting || aiLoading} className="flex-1">
+                {submitting ? '提交中...' : `确认支付 ${product.price_per_use} CP`}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* 投资 Dialog */}
+      {/* 投资 Dialog — AI 自动生成建议 */}
       <Dialog open={showInvest} onOpenChange={setShowInvest}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>投资 · {product.name}</DialogTitle>
+            <DialogTitle>🤖 AI 投资决策 · {product.name}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
-            <div className="bg-gray-50 rounded p-3 text-sm">
-              <p>当前估值：<strong>{product.valuation?.toFixed(2)} CP</strong></p>
-              <p className="text-gray-500 mt-1">投资金额将换算为对应股权</p>
+            <div className="bg-green-50 rounded p-3 text-sm border border-green-200">
+              <p className="font-medium text-green-800">当前估值：{product.valuation?.toFixed(2)} CP</p>
             </div>
+
             <div>
               <Label>投资金额 (CP)</Label>
-              <Input type="number" value={investAmount}
-                onChange={(e) => setInvestAmount(e.target.value)}
-                placeholder="输入投资金额" />
+              <div className="flex gap-2 mt-1">
+                <Input type="number" value={investAmount}
+                  onChange={(e) => setInvestAmount(e.target.value)}
+                  placeholder="输入投资金额" />
+                <Button variant="outline" onClick={generateInvestAI}
+                  disabled={aiLoading || !investAmount}>
+                  {aiLoading ? '分析中...' : '🤖 AI 分析'}
+                </Button>
+              </div>
             </div>
-            <div>
-              <Label>投资理由</Label>
-              <Input value={investReason} onChange={(e) => setInvestReason(e.target.value)}
-                placeholder="为什么看好这个项目？" />
-            </div>
-            <div>
-              <Label>预期回报率 (%)</Label>
-              <Input type="number" value={expectedRoi}
-                onChange={(e) => setExpectedRoi(e.target.value)}
-                placeholder="20" />
-            </div>
+
+            {investReason && (
+              <div className="bg-gray-50 rounded p-3 space-y-2 text-sm">
+                <p><strong>📋 投资理由：</strong>{investReason}</p>
+                <p><strong>📈 预期 ROI：</strong>{expectedRoi}%</p>
+                <p><strong>⚠️ 风险等级：</strong>
+                  <span className={investRisk === 'low' ? 'text-green-600' : investRisk === 'high' ? 'text-red-600' : 'text-yellow-600'}>
+                    {investRisk === 'low' ? '🟢 低风险' : investRisk === 'high' ? '🔴 高风险' : '🟡 中等风险'}
+                  </span>
+                </p>
+                <p><strong>🎯 AI 建议：</strong>
+                  <span className={investAction === 'approve' ? 'text-green-600 font-medium' : investAction === 'reject' ? 'text-red-600 font-medium' : 'text-yellow-600 font-medium'}>
+                    {investAction === 'approve' ? '✅ 建议投资' : investAction === 'reject' ? '❌ 不建议投资' : '⚡ 建议谨慎'}
+                  </span>
+                </p>
+              </div>
+            )}
+
             {result && <p className="text-sm">{result}</p>}
-            <Button onClick={handleInvest} disabled={submitting || !investAmount} className="w-full">
-              {submitting ? '提交中...' : '确认投资'}
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setShowInvest(false)} className="flex-1">
+                取消
+              </Button>
+              <Button onClick={handleInvest} disabled={submitting || !investAmount || !investReason} className="flex-1">
+                {submitting ? '提交中...' : '确认投资'}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

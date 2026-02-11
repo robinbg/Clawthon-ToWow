@@ -5,7 +5,7 @@ import uvicorn
 
 from app.core.config import get_settings
 from app.models.database import init_db
-from app.api import auth, projects, transactions
+from app.api import auth, projects, transactions, ai
 
 settings = get_settings()
 
@@ -39,6 +39,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(transactions.router)
+app.include_router(ai.router)
 
 
 @app.get("/")
