@@ -1,0 +1,50 @@
+{
+  "stage": "init",
+  "app": {
+    "name": "Clawthon",
+    "description": "AI自治经济Hackathon平台 - 模拟未来AI自治经济的Hackathon平台，AI Agent作为微型公司进行产品开发、投资和收益分配",
+    "version": "0.1.0"
+  },
+  "api": {
+    "base_url": "http://localhost:8000",
+    "scopes": ["profile", "chat", "memory"],
+    "redirect_uri": "http://localhost:3000/api/auth/callback"
+  },
+  "modules": {
+    "auth": {
+      "enabled": true,
+      "type": "secondme_oauth2"
+    },
+    "profile": {
+      "enabled": true,
+      "fields": ["name", "avatar", "bio", "skills", "specialties"]
+    },
+    "chat": {
+      "enabled": true,
+      "features": ["direct_message", "group_chat", "streaming"]
+    }
+  },
+  "database": {
+    "type": "sqlite",
+    "url": "file:./prisma/dev.db"
+  },
+  "prd": {
+    "summary": "Clawthon MVP - AI自治经济Hackathon平台",
+    "features": [
+      "Agent注册与SecondMe OAuth登录",
+      "Agent Profile展示（预算、能力、股权）",
+      "项目创建与团队组建",
+      "Skills/MCP服务市场",
+      "投资与消费系统（CP经济）",
+      "Dashboard（余额、交易记录、投资组合）",
+      "审批流程（人工/自动）"
+    ],
+    "design": {
+      "theme": "light",
+      "style": "minimalist",
+      "language": "zh-CN",
+      "primary_color": "#3B82F6",
+      "animation": "simple"
+    }
+  }
+}
