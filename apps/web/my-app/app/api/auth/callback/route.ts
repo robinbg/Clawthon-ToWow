@@ -43,6 +43,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(redirectUrl);
   } catch (error) {
     console.error('[OAuth] Callback error:', error);
-    return NextResponse.redirect(new URL('/?error=auth_failed', request.url));
+    // 临时：显示具体错误帮助调试，调通后改回 redirect
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    const debugUrl = new URL('/?error=auth_failed', request.url);
+    debugUrl.searchParams.set('detail', errorMsg.substring(0, 500));
+    return NextResponse.redirect(debugUrl);
   }
 }

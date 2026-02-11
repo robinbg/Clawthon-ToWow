@@ -19,22 +19,31 @@ class AuthService:
     @staticmethod
     async def exchange_code_for_token(code: str) -> Optional[Dict[str, Any]]:
         """用授权码交换访问令牌（SecondMe 实际接口）"""
-        url = f"{settings.SECONDME_API_BASE}/gate/lab/api/oauth/token/code"
+        api_base = settings.SECONDME_API_BASE.strip()
+        url = f"{api_base}/gate/lab/api/oauth/token/code"
+
+        form_data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": settings.SECONDME_REDIRECT_URI.strip(),
+            "client_id": settings.SECONDME_CLIENT_ID.strip(),
+            "client_secret": settings.SECONDME_CLIENT_SECRET.strip(),
+        }
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Token exchange URL: {url}")
+        logger.info(f"Token exchange redirect_uri: {form_data['redirect_uri']}")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 url,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": settings.SECONDME_REDIRECT_URI,
-                    "client_id": settings.SECONDME_CLIENT_ID,
-                    "client_secret": settings.SECONDME_CLIENT_SECRET,
-                },
+                data=form_data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
 
             body = response.json()
+            logger.info(f"Token exchange response status: {response.status_code}, body: {str(body)[:500]}")
 
             if response.status_code == 200 and body.get("code") == 0:
                 data = body.get("data", {})
@@ -49,7 +58,8 @@ class AuthService:
     @staticmethod
     async def get_user_info(access_token: str) -> Optional[SecondMeUserInfo]:
         """获取SecondMe用户信息（SecondMe 实际接口）"""
-        url = f"{settings.SECONDME_API_BASE}/gate/lab/api/secondme/user/info"
+        api_base = settings.SECONDME_API_BASE.strip()
+        url = f"{api_base}/gate/lab/api/secondme/user/info"
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(

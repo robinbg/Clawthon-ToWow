@@ -8,7 +8,8 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Plus, Users, DollarSign, TrendingUp } from 'lucide-react';
+import { Separator } from '@/components/ui/separator';
+import { Plus, Users, DollarSign, TrendingUp, Rocket, Settings } from 'lucide-react';
 import type { Project, ProjectStatus, ProductType } from '@/app/types';
 
 const productTypeLabels: Record<string, string> = {
@@ -152,7 +153,7 @@ export default function ProjectsPage() {
         ) : (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {projects.map((project) => (
-              <ProjectCard key={project.id} project={project} />
+              <ProjectCard key={project.id} project={project} onUpdate={loadProjects} />
             ))}
           </div>
         )}
@@ -161,69 +162,146 @@ export default function ProjectsPage() {
   );
 }
 
-function ProjectCard({ project }: { project: Project }) {
+function ProjectCard({ project, onUpdate }: { project: Project; onUpdate: () => void }) {
+  const [showManage, setShowManage] = useState(false);
+  const [price, setPrice] = useState(String(project.price_per_use || 0));
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  const isAgentProduct = ['agent_skill', 'agent_mcp', 'agent_service'].includes(project.product_type);
+  const canLaunch = project.status !== 'launched' && project.status !== 'iterating';
+
+  async function handleLaunch() {
+    setSaving(true);
+    try {
+      await api.request(`/projects/${project.id}/launch`, { method: 'POST' });
+      setMsg('✅ 项目已上线！');
+      onUpdate();
+    } catch (err: any) {
+      setMsg(`❌ ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSavePrice() {
+    setSaving(true);
+    try {
+      await api.request(`/projects/${project.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ price_per_use: Number(price) }),
+      });
+      setMsg('✅ 价格已更新');
+      onUpdate();
+    } catch (err: any) {
+      setMsg(`❌ ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <Card className="flex flex-col">
-      <CardHeader>
-        <div className="flex items-start justify-between">
-          <div>
-            <CardTitle className="text-lg">{project.name}</CardTitle>
-            <CardDescription className="mt-1">{project.description}</CardDescription>
-          </div>
-          <Badge className={statusColors[project.status]}>
-            {statusLabels[project.status]}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="flex-1">
-        <div className="space-y-3">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-gray-600">类型</span>
-            <Badge variant="outline">{productTypeLabels[project.product_type]}</Badge>
-          </div>
-
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-gray-600 flex items-center gap-1">
-              <TrendingUp className="h-4 w-4" />
-              估值
-            </span>
-            <span className="font-medium">{project.valuation?.toFixed(2)} CP</span>
-          </div>
-
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-gray-600 flex items-center gap-1">
-              <DollarSign className="h-4 w-4" />
-              资金池
-            </span>
-            <span className="font-medium">{project.funding_pool?.toFixed(2)} CP</span>
-          </div>
-
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-gray-600 flex items-center gap-1">
-              <Users className="h-4 w-4" />
-              团队成员
-            </span>
-            <span className="font-medium">{project.team_members?.length || 1} 人</span>
-          </div>
-
-          {(project.product_type === 'agent_skill' ||
-            project.product_type === 'agent_mcp' ||
-            project.product_type === 'agent_service') && (
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-600">使用价格</span>
-              <span className="font-medium text-blue-600">
-                {project.price_per_use?.toFixed(2) || 0} CP
-              </span>
+    <>
+      <Card className="flex flex-col">
+        <CardHeader>
+          <div className="flex items-start justify-between">
+            <div>
+              <CardTitle className="text-lg">{project.name}</CardTitle>
+              <CardDescription className="mt-1">{project.description}</CardDescription>
             </div>
-          )}
-
-          <div className="pt-3">
-            <Button variant="outline" className="w-full">
-              管理项目
-            </Button>
+            <Badge className={statusColors[project.status]}>
+              {statusLabels[project.status]}
+            </Badge>
           </div>
-        </div>
-      </CardContent>
-    </Card>
+        </CardHeader>
+        <CardContent className="flex-1">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-gray-600">类型</span>
+              <Badge variant="outline">{productTypeLabels[project.product_type]}</Badge>
+            </div>
+
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-gray-600 flex items-center gap-1">
+                <TrendingUp className="h-4 w-4" /> 估值
+              </span>
+              <span className="font-medium">{project.valuation?.toFixed(2)} CP</span>
+            </div>
+
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-gray-600 flex items-center gap-1">
+                <DollarSign className="h-4 w-4" /> 资金池
+              </span>
+              <span className="font-medium">{project.funding_pool?.toFixed(2)} CP</span>
+            </div>
+
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-gray-600 flex items-center gap-1">
+                <Users className="h-4 w-4" /> 团队
+              </span>
+              <span className="font-medium">{project.team_members?.length || 1} 人</span>
+            </div>
+
+            {isAgentProduct && (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-600">使用价格</span>
+                <span className="font-medium text-blue-600">
+                  {project.price_per_use?.toFixed(2) || 0} CP
+                </span>
+              </div>
+            )}
+
+            <div className="pt-3">
+              <Button variant="outline" className="w-full" onClick={() => setShowManage(true)}>
+                <Settings className="mr-2 h-4 w-4" /> 管理项目
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Dialog open={showManage} onOpenChange={setShowManage}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>管理 · {project.name}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="bg-gray-50 rounded p-3 text-sm space-y-1">
+              <p>状态：<Badge className={statusColors[project.status]}>{statusLabels[project.status]}</Badge></p>
+              <p>总收入：{project.total_revenue?.toFixed(2)} CP</p>
+              <p>使用次数：{project.usage_count || 0} 次</p>
+            </div>
+
+            {isAgentProduct && (
+              <>
+                <Separator />
+                <div>
+                  <Label>使用价格 (CP/次)</Label>
+                  <div className="flex gap-2 mt-1">
+                    <Input type="number" value={price} onChange={(e) => setPrice(e.target.value)} />
+                    <Button onClick={handleSavePrice} disabled={saving} size="sm">保存</Button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {canLaunch && (
+              <>
+                <Separator />
+                <Button onClick={handleLaunch} disabled={saving} className="w-full">
+                  <Rocket className="mr-2 h-4 w-4" />
+                  {saving ? '上线中...' : '上线到市场'}
+                </Button>
+                <p className="text-xs text-gray-500 text-center">
+                  上线后产品将出现在市场中，其他 Agent 可以使用
+                </p>
+              </>
+            )}
+
+            {msg && <p className="text-sm text-center">{msg}</p>}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

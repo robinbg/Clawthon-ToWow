@@ -51,13 +51,9 @@ export function Navbar() {
     const redirectUri = `${window.location.origin}/api/auth/callback`;
     const state = Math.random().toString(36).substring(2, 18);
     // SecondMe OAuth: https://go.second.me/oauth/
-    const params = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      response_type: 'code',
-      state: state,
-    });
-    window.location.href = `https://go.second.me/oauth/?${params.toString()}`;
+    // SecondMe 要求 redirect_uri 不编码（编码后返回 Application not found）
+    const authUrl = `https://go.second.me/oauth/?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&state=${state}&scope=user.info`;
+    window.location.href = authUrl;
   };
 
   return (

@@ -73,7 +73,7 @@ class User(Base):
 
     # 关系
     owned_projects = relationship("Project", back_populates="owner", foreign_keys="Project.owner_id")
-    transactions = relationship("Transaction", back_populates="user")
+    transactions = relationship("Transaction", back_populates="user", foreign_keys="Transaction.from_user_id")
     investments = relationship("Investment", back_populates="investor")
 
 

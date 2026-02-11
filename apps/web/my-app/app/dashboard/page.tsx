@@ -14,8 +14,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Wallet, TrendingUp, TrendingDown, PiggyBank, Briefcase } from 'lucide-react';
-import type { DashboardData, Transaction, SpendingAnalytics } from '@/app/types';
+import { Wallet, TrendingUp, TrendingDown, PiggyBank, Briefcase, Check, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import type { DashboardData, Transaction, SpendingAnalytics, Investment } from '@/app/types';
 
 export default function DashboardPage() {
   return (
@@ -117,6 +118,8 @@ function DashboardContent() {
         <Tabs defaultValue="transactions" className="space-y-6">
           <TabsList>
             <TabsTrigger value="transactions">交易记录</TabsTrigger>
+            <TabsTrigger value="approvals">待审批</TabsTrigger>
+            <TabsTrigger value="investments">我的投资</TabsTrigger>
             <TabsTrigger value="spending">消费分析</TabsTrigger>
             <TabsTrigger value="settings">自动设置</TabsTrigger>
           </TabsList>
@@ -130,6 +133,14 @@ function DashboardContent() {
                 <TransactionTable transactions={recent_transactions} />
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="approvals">
+            <ApprovalPanel />
+          </TabsContent>
+
+          <TabsContent value="investments">
+            <InvestmentPanel />
           </TabsContent>
 
           <TabsContent value="spending">
@@ -321,5 +332,147 @@ function SpendingTable({ data }: { data: SpendingAnalytics[] }) {
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+function ApprovalPanel() {
+  const [pending, setPending] = useState<Transaction[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadPending();
+  }, []);
+
+  async function loadPending() {
+    try {
+      const data = await api.getPendingTransactions();
+      setPending(data);
+    } catch {
+      console.error('加载待审批交易失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleApprove(id: number, approved: boolean) {
+    try {
+      await api.approveTransaction(id, approved, approved ? '批准' : '拒绝');
+      setPending(pending.filter((t) => t.id !== id));
+    } catch (err) {
+      console.error('审批失败:', err);
+    }
+  }
+
+  if (loading) return <Card><CardContent className="py-8 text-center text-gray-500">加载中...</CardContent></Card>;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>待审批交易</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {pending.length === 0 ? (
+          <div className="text-center py-8 text-gray-500">暂无待审批交易 🎉</div>
+        ) : (
+          <div className="space-y-4">
+            {pending.map((tx) => (
+              <div key={tx.id} className="border rounded-lg p-4 space-y-3">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="font-medium">{tx.from_user_name} 申请消费</p>
+                    <p className="text-sm text-gray-500">
+                      目标：{tx.to_project_name || '未知项目'} · {tx.amount.toFixed(2)} CP
+                    </p>
+                  </div>
+                  <Badge variant="outline">待审批</Badge>
+                </div>
+                {tx.description && (
+                  <div className="bg-gray-50 rounded p-3 text-sm">
+                    <p className="text-gray-700"><strong>理由：</strong>{tx.description}</p>
+                    {tx.expected_return && (
+                      <p className="text-gray-700 mt-1"><strong>预期收益：</strong>{tx.expected_return}</p>
+                    )}
+                  </div>
+                )}
+                <div className="flex gap-2 justify-end">
+                  <Button size="sm" variant="outline" onClick={() => handleApprove(tx.id, false)}>
+                    <X className="mr-1 h-4 w-4" /> 拒绝
+                  </Button>
+                  <Button size="sm" onClick={() => handleApprove(tx.id, true)}>
+                    <Check className="mr-1 h-4 w-4" /> 批准
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function InvestmentPanel() {
+  const [investments, setInvestments] = useState<Investment[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadInvestments();
+  }, []);
+
+  async function loadInvestments() {
+    try {
+      const data = await api.getInvestments();
+      setInvestments(data);
+    } catch {
+      console.error('加载投资记录失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (loading) return <Card><CardContent className="py-8 text-center text-gray-500">加载中...</CardContent></Card>;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>我的投资</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {investments.length === 0 ? (
+          <div className="text-center py-8 text-gray-500">暂无投资记录</div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>项目</TableHead>
+                <TableHead>金额</TableHead>
+                <TableHead>股权</TableHead>
+                <TableHead>预期 ROI</TableHead>
+                <TableHead>方式</TableHead>
+                <TableHead>时间</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {investments.map((inv) => (
+                <TableRow key={inv.id}>
+                  <TableCell className="font-medium">{inv.project_name}</TableCell>
+                  <TableCell>{inv.amount.toFixed(2)} CP</TableCell>
+                  <TableCell>{(inv.equity_percentage * 100).toFixed(2)}%</TableCell>
+                  <TableCell>{inv.expected_roi ? `${inv.expected_roi}%` : '-'}</TableCell>
+                  <TableCell>
+                    <Badge variant={inv.is_auto_invest ? 'secondary' : 'default'}>
+                      {inv.is_auto_invest ? '自动' : '手动'}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-gray-500">
+                    {new Date(inv.created_at).toLocaleDateString('zh-CN')}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   );
 }
