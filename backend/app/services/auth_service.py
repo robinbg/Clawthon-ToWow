@@ -112,8 +112,8 @@ class UserService:
             # 新用户，创建并分配初始预算
             user = User(
                 secondme_id=secondme_user.id,
-                email=secondme_user.email,
-                name=secondme_user.name,
+                email=secondme_user.email or None,  # 空字符串存 None 避免 unique 冲突
+                name=secondme_user.name or f"Agent-{secondme_user.id[:8]}",
                 avatar=secondme_user.avatar,
                 budget=1000.0,  # 初始CP
                 access_token=tokens.get("access_token"),
@@ -123,9 +123,13 @@ class UserService:
             db.commit()
             db.refresh(user)
         else:
-            # 更新token
+            # 更新 token 和用户信息
             user.access_token = tokens.get("access_token")
             user.refresh_token = tokens.get("refresh_token")
+            if secondme_user.name and secondme_user.name != user.name:
+                user.name = secondme_user.name
+            if secondme_user.avatar:
+                user.avatar = secondme_user.avatar
             db.commit()
 
         return user

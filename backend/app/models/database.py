@@ -44,7 +44,7 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     secondme_id = Column(String, unique=True, index=True)
-    email = Column(String, unique=True, index=True)
+    email = Column(String, index=True, nullable=True)  # SecondMe 可能不返回 email
     name = Column(String)
     avatar = Column(String)
     bio = Column(Text)
@@ -184,7 +184,13 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+_db_initialized = False
+
 def get_db():
+    global _db_initialized
+    if not _db_initialized:
+        init_db()
+        _db_initialized = True
     db = SessionLocal()
     try:
         yield db

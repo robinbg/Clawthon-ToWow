@@ -51,29 +51,57 @@ class OAuthCallbackRequest(BaseModel):
 @router.post("/callback")
 async def oauth_callback(request: OAuthCallbackRequest, db: Session = Depends(get_db)):
     """SecondMe OAuth2 回调处理"""
+    import logging
+    logger = logging.getLogger(__name__)
+
     code = request.code
+    logger.info(f"[OAuth] Received code: {code[:20]}...")
+
     # 1. 用 code 换 token
     tokens = await AuthService.exchange_code_for_token(code)
     if not tokens:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="无法获取访问令牌"
+            detail="无法获取访问令牌（SecondMe token exchange failed）"
         )
+    logger.info(f"[OAuth] Token exchange OK, open_id: {tokens.get('open_id', 'N/A')[:10]}...")
 
-    # 2. 获取用户信息
-    secondme_user = await AuthService.get_user_info(tokens["access_token"])
+    # 2. 获取用户信息（可能失败，但不阻塞流程）
+    secondme_user = None
+    try:
+        secondme_user = await AuthService.get_user_info(tokens["access_token"])
+    except Exception as e:
+        logger.warning(f"[OAuth] Get user info failed: {e}, using fallback")
+
+    # 3. 构建用户标识（优先用 open_id from token，其次 user info）
+    open_id = tokens.get("open_id", "")
+    if not open_id and secondme_user:
+        open_id = secondme_user.id
+    if not open_id:
+        # 最后兜底：用 code 的 hash 作为唯一标识
+        import hashlib
+        open_id = "auto_" + hashlib.md5(code.encode()).hexdigest()[:16]
+
+    # 构造 SecondMeUserInfo
+    from ..schemas.schemas import SecondMeUserInfo
     if not secondme_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="无法获取用户信息"
+        secondme_user = SecondMeUserInfo(
+            id=open_id,
+            email="",
+            name=f"Agent-{open_id[:8]}",
+            avatar=None,
         )
+    elif not secondme_user.id:
+        secondme_user.id = open_id
 
-    # 3. 创建或更新用户
+    logger.info(f"[OAuth] User: id={secondme_user.id[:10]}, name={secondme_user.name}")
+
+    # 4. 创建或更新用户
     user = UserService.get_or_create_user(db, secondme_user, tokens)
 
-    # 4. 创建应用内的JWT
+    # 5. 创建应用内的JWT
     access_token = AuthService.create_access_token(
-        data={"sub": str(user.id), "email": user.email}
+        data={"sub": str(user.id), "email": user.email or ""}
     )
 
     return {
