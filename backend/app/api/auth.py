@@ -16,7 +16,7 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
-    """获取当前登录用户"""
+    """获取当前登录用户（Vercel serverless 兼容：DB 丢失时自动重建用户）"""
     token = credentials.credentials
     payload = AuthService.verify_token(token)
 
@@ -35,11 +35,39 @@ async def get_current_user(
         )
 
     user = UserService.get_user_by_id(db, int(user_id))
+
+    if not user:
+        # Vercel serverless DB 是临时的，用 JWT 里的信息重建用户
+        secondme_id = payload.get("secondme_id", "")
+        if secondme_id:
+            # 先按 secondme_id 查找
+            user = db.query(User).filter(User.secondme_id == secondme_id).first()
+
+        if not user and secondme_id:
+            # 仍然找不到，重建用户
+            user = User(
+                secondme_id=secondme_id,
+                email=payload.get("email") or None,
+                name=payload.get("name") or f"Agent-{secondme_id[:8]}",
+                avatar=payload.get("avatar") or None,
+                budget=1000.0,
+                access_token=payload.get("secondme_token", ""),
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户不存在",
+            detail="用户不存在且无法重建",
         )
+
+    # 更新 SecondMe token（如果 JWT 里有更新的）
+    sm_token = payload.get("secondme_token", "")
+    if sm_token and sm_token != user.access_token:
+        user.access_token = sm_token
+        db.commit()
 
     return user
 
@@ -99,9 +127,16 @@ async def oauth_callback(request: OAuthCallbackRequest, db: Session = Depends(ge
     # 4. 创建或更新用户
     user = UserService.get_or_create_user(db, secondme_user, tokens)
 
-    # 5. 创建应用内的JWT
+    # 5. 创建应用内的JWT（嵌入用户信息，应对 Vercel serverless 临时 DB）
     access_token = AuthService.create_access_token(
-        data={"sub": str(user.id), "email": user.email or ""}
+        data={
+            "sub": str(user.id),
+            "secondme_id": user.secondme_id,
+            "name": user.name or "",
+            "email": user.email or "",
+            "avatar": user.avatar or "",
+            "secondme_token": tokens.get("access_token", ""),
+        }
     )
 
     return {
