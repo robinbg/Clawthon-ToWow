@@ -17,6 +17,7 @@ import type { User } from '@/app/types';
 
 const navItems = [
   { label: '首页', href: '/' },
+  { label: '🤖 Agent工作台', href: '/agent' },
   { label: '市场', href: '/marketplace' },
   { label: '我的项目', href: '/projects' },
   { label: 'Dashboard', href: '/dashboard' },
