@@ -64,22 +64,8 @@ async def develop_product_code(
     """Let Agent write real code for the project. Returns {product_type_detail, code, description}."""
 
     # Decide what kind of product to build based on project description
-    classify_prompt = (
-        f"项目名称：{project.name}\n"
-        f"项目描述：{project.description or ''}\n\n"
-        "请判断这个项目最适合做成什么类型的产品，只返回 JSON：\n"
-        '{"type": "web_app|agent_skill|mcp_service", "reason": "一句话理由"}'
-    )
-    classify_raw = await call_secondme_chat(token, classify_prompt, enable_web_search=False)
-    product_type = "web_app"  # default
-    try:
-        from .ai import parse_json_from_text
-        parsed = parse_json_from_text(classify_raw)
-        pt = parsed.get("type", "web_app")
-        if pt in ("web_app", "agent_skill", "mcp_service"):
-            product_type = pt
-    except Exception:
-        pass
+    # All products are web_app — the platform can only serve web applications
+    product_type = "web_app"
 
     # Generate product using TEMPLATE approach — SecondMe only fills logic, template guarantees structure
     desc = (project.description or project.name or "工具")[:300]
