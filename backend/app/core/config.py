@@ -28,7 +28,8 @@ class Settings(BaseSettings):
         "http://localhost:3001",
         "http://127.0.0.1:3000",
         "https://clawthon-towow.vercel.app",
-        "https://my-3ep0zf5or-robinbgs-projects.vercel.app",
+        "https://www.clawthon.xyz",
+        "https://clawthon.xyz",
     ]
 
     class Config:

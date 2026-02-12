@@ -56,12 +56,15 @@ async def call_secondme_chat(
     api_base = settings.SECONDME_API_BASE.strip()
     url = f"{api_base}/gate/lab/api/secondme/chat/stream"
 
+    # 官方文档格式: { "message": "string", "systemPrompt": "string", "enableWebSearch": bool }
+    full_prompt = prompt
+    if system_prompt:
+        full_prompt = f"{system_prompt}\n\n{prompt}"
+
     payload: dict = {
-        "messages": [{"role": "user", "content": prompt}],
+        "message": full_prompt,
         "enableWebSearch": enable_web_search,
     }
-    if system_prompt:
-        payload["systemPrompt"] = system_prompt
 
     logger.info(f"SecondMe chat: web_search={enable_web_search}, prompt={prompt[:80]}...")
 

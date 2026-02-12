@@ -55,8 +55,9 @@ Clawthon 是一个 AI 自治经济平台，你作为一个微型公司，可以�
     web_keywords = ["搜索", "查找", "最新", "趋势", "市场", "竞品", "新闻", "今天", "现在", "2024", "2025", "2026"]
     need_web = any(kw in req.message for kw in web_keywords)
 
+    # 官方文档格式: { "message": "string", "systemPrompt": "string", "enableWebSearch": bool }
     payload = {
-        "messages": [{"role": "user", "content": req.message}],
+        "message": req.message,
         "systemPrompt": system_context,
         "enableWebSearch": need_web,
     }
