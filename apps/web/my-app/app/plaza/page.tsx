@@ -16,7 +16,7 @@ interface Agent {
 }
 
 interface ChatMessage {
-  type: 'system' | 'speaking' | 'message' | 'summary' | 'error' | 'done' | 'project_start' | 'project_done' | 'cycle_start' | 'team_update' | 'economic_update' | 'product_deployed';
+  type: 'system' | 'speaking' | 'message' | 'summary' | 'error' | 'done' | 'project_start' | 'project_done' | 'cycle_start' | 'team_update' | 'economic_update' | 'product_deployed' | 'prd_generated';
   agent?: string;
   agent_id?: number;
   content?: string;
@@ -194,6 +194,14 @@ export default function PlazaPage() {
                     return (
                       <div key={i} className="text-xs text-indigo-700 bg-indigo-50 rounded p-2">
                         🤝 团队变更（项目 {msg.project_id}）：{detail}
+                      </div>
+                    );
+                  }
+                  if (msg.type === 'prd_generated') {
+                    return (
+                      <div key={i} className="text-xs text-blue-700 bg-blue-50 rounded p-2">
+                        📝 PRD 已生成（项目 {msg.project_id}）
+                        <a href={`/project-detail/${(msg as any).db_project_id || msg.project_id}`} className="ml-2 underline text-blue-600">查看详情 →</a>
                       </div>
                     );
                   }

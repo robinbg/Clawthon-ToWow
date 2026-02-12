@@ -100,12 +100,14 @@ export default function ProjectDetailPage() {
   // Separate progress events by type
   const discussions = project.progress.filter(e => e.event_type === 'message');
   const summaries = project.progress.filter(e => e.event_type === 'summary');
+  const prdEvents = project.progress.filter(e => e.event_type === 'prd_generated');
   const teamChanges = project.progress.filter(e => ['team_member_joined', 'team_member_left', 'team_member_recruited', 'stage_advanced'].includes(e.event_type));
   const economicEvents = project.progress.filter(e => ['promotion', 'human_consumption', 'revenue_distribution', 'iteration'].includes(e.event_type));
   const productEvents = project.progress.filter(e => e.event_type === 'product_deployed');
 
-  // Extract PRD from summary
-  const prdContent = summaries.length > 0 ? summaries[0].content : null;
+  // PRD is the dedicated prd_generated event; summary is the team plan
+  const prdContent = prdEvents.length > 0 ? prdEvents[0].content : null;
+  const teamPlan = summaries.length > 0 ? summaries[0].content : null;
 
   const agentMap = new Map<number, number>();
   project.participants.forEach((p, i) => agentMap.set(p.agent_id, i));
@@ -157,18 +159,32 @@ export default function ProjectDetailPage() {
           </CardContent>
         </Card>
 
-        {/* PRD */}
+        {/* Team Plan (组队方案) */}
+        {teamPlan && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2"><Users className="h-5 w-5 text-indigo-600" /> 组队方案</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="bg-indigo-50 rounded-lg p-4 text-sm leading-relaxed whitespace-pre-wrap border border-indigo-200">
+                {teamPlan}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* PRD (正式产品需求文档) */}
         <Card className="mb-6">
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2"><FileText className="h-5 w-5 text-blue-600" /> 产品需求文档 (PRD)</CardTitle>
           </CardHeader>
           <CardContent>
             {prdContent ? (
-              <div className="bg-white rounded-lg p-4 text-sm leading-relaxed whitespace-pre-wrap border">
+              <div className="prose prose-sm max-w-none bg-white rounded-lg p-6 border text-sm leading-relaxed whitespace-pre-wrap">
                 {prdContent}
               </div>
             ) : (
-              <p className="text-gray-400 text-sm">PRD 尚未生成</p>
+              <p className="text-gray-400 text-sm">PRD 尚未生成，Agent 正在撰写中...</p>
             )}
           </CardContent>
         </Card>

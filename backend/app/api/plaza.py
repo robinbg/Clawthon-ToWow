@@ -179,6 +179,8 @@ def _flatten_discussions(projects_payload: list[dict[str, Any]]) -> list[dict[st
                 "human_consumption",
                 "revenue_distribution",
                 "iteration",
+                "prd_generated",
+                "product_deployed",
             ):
                 continue
             mapped_type = "message"
@@ -188,6 +190,10 @@ def _flatten_discussions(projects_payload: list[dict[str, Any]]) -> list[dict[st
                 mapped_type = "summary"
             elif event_type in ("team_member_joined", "team_member_left", "team_member_recruited"):
                 mapped_type = "team_update"
+            elif event_type == "prd_generated":
+                mapped_type = "prd_generated"
+            elif event_type == "product_deployed":
+                mapped_type = "product_deployed"
             elif event_type in ("stage_advanced", "promotion", "human_consumption", "revenue_distribution", "iteration"):
                 mapped_type = "system"
             events.append(
@@ -715,6 +721,32 @@ async def autonomous_feed(
                     db_project.status = ProjectStatus.TEAM_FORMING
                 _append_progress(db, db_project, event_type="summary", content=summary[:2000], agent_id=lead.id, agent_name=_pick_agent_name(lead))
                 yield _to_sse({"type": "summary", "project_id": project_id, "db_project_id": db_project.id, "topic": topic, "mode": mode, "content": summary})
+
+                # ---- PRD: Agent 撰写正式产品需求文档 ----
+                yield _to_sse({"type": "system", "content": f"📝 Agent 正在为项目 {project_id} 撰写 PRD..."})
+                try:
+                    prd_prompt = (
+                        f"你是产品经理 Agent。请为项目「{db_project.name}」撰写一份正式的产品需求文档（PRD）。\n"
+                        f"项目描述：{db_project.description}\n"
+                        f"团队方案：{summary[:500]}\n\n"
+                        "PRD 必须包含以下章节（用 Markdown 格式）：\n"
+                        "## 1. 产品概述\n简明描述产品定位、目标用户、核心价值\n"
+                        "## 2. 目标用户\n用户画像、使用场景\n"
+                        "## 3. 核心功能\n列出 3-5 个核心功能，每个说明用途和交互方式\n"
+                        "## 4. 技术方案\n前端/后端/数据方案概要\n"
+                        "## 5. MVP 范围\n第一版要做什么、不做什么\n"
+                        "## 6. 成功指标\n如何衡量产品是否成功\n"
+                        "## 7. 里程碑\n分阶段交付计划\n\n"
+                        "直接输出 Markdown 内容，不要 JSON 包装。"
+                    )
+                    prd_text = await _stream_agent_reply(url=url, token=lead.access_token, prompt=prd_prompt, web_search=False)
+                    prd_text = (prd_text or "").strip()
+                    if prd_text:
+                        _append_progress(db, db_project, event_type="prd_generated", content=prd_text[:3000], agent_id=lead.id, agent_name=_pick_agent_name(lead))
+                        yield _to_sse({"type": "prd_generated", "project_id": project_id, "db_project_id": db_project.id, "content": prd_text})
+                except Exception as exc:
+                    yield _to_sse({"type": "error", "content": f"PRD 生成失败: {str(exc)[:100]}"})
+
                 yield _to_sse({"type": "project_done", "project_id": project_id, "db_project_id": db_project.id})
 
                 # ---- SANDBOX: Agent 真实开发产品 ----
