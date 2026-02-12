@@ -159,16 +159,14 @@ export default function ProjectDetailPage() {
           </CardContent>
         </Card>
 
-        {/* Team Plan (组队方案) */}
+        {/* Team Plan (组队方案) — parsed from JSON into structured cards */}
         {teamPlan && (
           <Card className="mb-6">
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2"><Users className="h-5 w-5 text-indigo-600" /> 组队方案</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="bg-indigo-50 rounded-lg p-4 text-sm leading-relaxed whitespace-pre-wrap border border-indigo-200">
-                {teamPlan}
-              </div>
+              <TeamPlanView raw={teamPlan} />
             </CardContent>
           </Card>
         )}
@@ -281,6 +279,104 @@ export default function ProjectDetailPage() {
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
+}
+
+/** Parse team plan JSON and render as structured cards */
+function TeamPlanView({ raw }: { raw: string }) {
+  // Try to extract JSON from the raw text
+  let parsed: any = null;
+  try {
+    // Direct parse
+    parsed = JSON.parse(raw);
+  } catch {
+    // Try to find JSON block in markdown
+    const match = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+    if (match) {
+      try { parsed = JSON.parse(match[1]); } catch {}
+    }
+    if (!parsed) {
+      // Try to find outermost { }
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      if (start >= 0 && end > start) {
+        try { parsed = JSON.parse(raw.substring(start, end + 1)); } catch {}
+      }
+    }
+  }
+
+  if (!parsed) {
+    // Fallback: show as formatted text
+    return <div className="text-sm whitespace-pre-wrap text-gray-700">{raw}</div>;
+  }
+
+  const teamName = parsed.team_name || '';
+  const projectIdea = parsed.project_idea || '';
+  const members = Array.isArray(parsed.members) ? parsed.members : [];
+  const nextSteps = Array.isArray(parsed.next_steps) ? parsed.next_steps : [];
+
+  return (
+    <div className="space-y-4">
+      {/* Team name + project idea */}
+      {teamName && (
+        <div className="bg-gradient-to-r from-indigo-50 to-blue-50 rounded-xl p-4 border border-indigo-100">
+          <h3 className="text-lg font-bold text-indigo-900">{teamName}</h3>
+          {projectIdea && <p className="text-sm text-gray-700 mt-2 leading-relaxed">{projectIdea}</p>}
+        </div>
+      )}
+
+      {/* Members */}
+      {members.length > 0 && (
+        <div>
+          <p className="text-sm font-semibold text-gray-600 mb-2">👥 团队分工</p>
+          <div className="space-y-2">
+            {members.map((m: any, i: number) => (
+              <div key={i} className="flex gap-3 bg-white border rounded-lg p-3">
+                <div className={`h-10 w-10 rounded-full ${agentColors[i % agentColors.length]} flex-shrink-0 flex items-center justify-center text-white text-sm font-bold`}>
+                  {(m.name || '?')[0]}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-medium text-sm">{m.name || `成员 ${i+1}`}</span>
+                    <Badge variant="outline" className="text-xs">{m.role || '成员'}</Badge>
+                  </div>
+                  {m.contribution && (
+                    <p className="text-xs text-gray-500 mt-1 leading-relaxed">{m.contribution}</p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Next steps */}
+      {nextSteps.length > 0 && (
+        <div>
+          <p className="text-sm font-semibold text-gray-600 mb-2">📅 执行计划</p>
+          <div className="space-y-1.5">
+            {nextSteps.map((step: string, i: number) => (
+              <div key={i} className="flex gap-2 text-sm">
+                <span className="flex-shrink-0 h-5 w-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">{i+1}</span>
+                <span className="text-gray-700">{step}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Extra text after JSON (如补充说明) */}
+      {(() => {
+        const jsonEnd = raw.lastIndexOf('}');
+        const extra = jsonEnd >= 0 ? raw.substring(jsonEnd + 1).replace(/```/g, '').trim() : '';
+        if (!extra) return null;
+        return (
+          <div className="bg-gray-50 rounded-lg p-3 text-sm text-gray-600 leading-relaxed whitespace-pre-wrap border">
+            {extra}
+          </div>
+        );
+      })()}
     </div>
   );
 }
