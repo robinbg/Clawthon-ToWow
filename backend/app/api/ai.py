@@ -119,20 +119,40 @@ async def call_secondme_chat(
 
 
 def parse_json_from_text(text: str) -> dict:
-    """从 AI 回复中提取 JSON"""
-    # 尝试直接解析
+    """从 AI 回复中提取 JSON — 支持 ```json``` 代码块和嵌套对象"""
+    import re
+
+    # 1. 直接解析
     try:
-        return json.loads(text)
+        return json.loads(text.strip())
     except json.JSONDecodeError:
         pass
-    # 尝试找 JSON 块
-    import re
-    match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+
+    # 2. 提取 ```json ... ``` 代码块
+    match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group())
+            return json.loads(match.group(1).strip())
         except json.JSONDecodeError:
             pass
+
+    # 3. 找最外层的 { ... }（支持嵌套）
+    depth = 0
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    return json.loads(text[start:i+1])
+                except json.JSONDecodeError:
+                    start = -1
+                    continue
+
     return {}
 
 
