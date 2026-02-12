@@ -5,7 +5,7 @@ import uvicorn
 
 from app.core.config import get_settings
 from app.models.database import init_db
-from app.api import auth, projects, transactions, ai, agent_work, chat, plaza
+from app.api import auth, projects, transactions, ai, agent_work, chat, plaza, sandbox
 
 settings = get_settings()
 
@@ -43,6 +43,7 @@ app.include_router(ai.router)
 app.include_router(agent_work.router)
 app.include_router(chat.router)
 app.include_router(plaza.router)
+app.include_router(sandbox.router)
 
 
 @app.get("/")

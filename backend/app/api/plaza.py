@@ -732,6 +732,25 @@ async def autonomous_feed(
                 yield _to_sse({"type": "summary", "project_id": project_id, "db_project_id": db_project.id, "topic": topic, "mode": mode, "content": summary})
                 yield _to_sse({"type": "project_done", "project_id": project_id, "db_project_id": db_project.id})
 
+                # ---- SANDBOX: Agent 真实开发产品 ----
+                yield _to_sse({"type": "system", "content": f"🔨 Agent 正在为项目 {project_id} 编写真实代码..."})
+                try:
+                    from .sandbox import develop_product_code
+                    dev_result = await develop_product_code(db=db, project=db_project, token=lead.access_token)
+                    _append_progress(db, db_project, event_type="product_deployed",
+                                     content=f"产品已部署：类型={dev_result['product_type_detail']}，代码{dev_result['code_length']}字符",
+                                     agent_id=lead.id, agent_name=_pick_agent_name(lead))
+                    yield _to_sse({
+                        "type": "product_deployed",
+                        "project_id": project_id,
+                        "db_project_id": db_project.id,
+                        "product_type": dev_result["product_type_detail"],
+                        "endpoint": dev_result["endpoint"],
+                        "code_length": dev_result["code_length"],
+                    })
+                except Exception as exc:
+                    yield _to_sse({"type": "error", "content": f"开发失败(#{db_project.id}): {str(exc)[:120]}"})
+
                 # governance + economy
                 try:
                     changes = await _autonomous_team_governance(db=db, project=db_project, token_agents=token_agents, fallback_token=current_user.access_token)

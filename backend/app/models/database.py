@@ -103,6 +103,11 @@ class Project(Base):
     # PRD内容
     prd_content = Column(Text)
 
+    # 沙盒产物：Agent 开发的真实代码
+    product_code = Column(Text)       # HTML/JS/Python 源码
+    product_type_detail = Column(String)  # "web_app" | "agent_skill" | "mcp_service"
+    product_endpoint = Column(String)  # 可访问的端点路径
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

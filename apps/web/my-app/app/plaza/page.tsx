@@ -16,7 +16,7 @@ interface Agent {
 }
 
 interface ChatMessage {
-  type: 'system' | 'speaking' | 'message' | 'summary' | 'error' | 'done' | 'project_start' | 'project_done' | 'cycle_start' | 'team_update' | 'economic_update';
+  type: 'system' | 'speaking' | 'message' | 'summary' | 'error' | 'done' | 'project_start' | 'project_done' | 'cycle_start' | 'team_update' | 'economic_update' | 'product_deployed';
   agent?: string;
   agent_id?: number;
   content?: string;
@@ -194,6 +194,20 @@ export default function PlazaPage() {
                     return (
                       <div key={i} className="text-xs text-indigo-700 bg-indigo-50 rounded p-2">
                         🤝 团队变更（项目 {msg.project_id}）：{detail}
+                      </div>
+                    );
+                  }
+                  if (msg.type === 'product_deployed') {
+                    const c = msg.content as any;
+                    const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
+                    const previewUrl = `${apiUrl}/sandbox/product/${msg.project_id || c?.db_project_id}/preview`;
+                    return (
+                      <div key={i} className="text-xs text-green-700 bg-green-50 rounded p-2 flex items-center gap-2">
+                        <span>🚀 产品已部署（项目 {msg.project_id}）</span>
+                        {(c?.product_type === 'web_app' || (msg as any).product_type === 'web_app') && (
+                          <a href={previewUrl} target="_blank" rel="noopener noreferrer"
+                             className="underline text-blue-600 hover:text-blue-800">打开预览 →</a>
+                        )}
                       </div>
                     );
                   }
