@@ -423,8 +423,11 @@ export default function AgentWorkspacePage() {
                             <Button size="sm" variant="default">🚀 打开产品</Button>
                           </a>
                         )}
-                        <Button size="sm" variant="outline" onClick={() => toggleProjectDetail(p.id)}>
-                          {expanded ? '收起详情' : '查看详情'}
+                        <a href={`/project-detail/${p.id}`}>
+                          <Button size="sm" variant="outline">📄 项目详情</Button>
+                        </a>
+                        <Button size="sm" variant="ghost" onClick={() => toggleProjectDetail(p.id)}>
+                          {expanded ? '收起' : '展开进度'}
                         </Button>
                       </div>
                       {expanded && (
