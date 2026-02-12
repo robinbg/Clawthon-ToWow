@@ -18,10 +18,7 @@ import type { User } from '@/app/types';
 const navItems = [
   { label: '首页', href: '/' },
   { label: '🏟️ 广场', href: '/plaza' },
-  { label: '💬 对话', href: '/chat' },
   { label: '🤖 工作台', href: '/agent' },
-  { label: '市场', href: '/marketplace' },
-  { label: '项目', href: '/projects' },
 ];
 
 // ---- Global agent stream (singleton, survives across page navigations) ----
