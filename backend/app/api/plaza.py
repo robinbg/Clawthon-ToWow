@@ -11,7 +11,16 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
-from ..models.database import Project, ProjectStatus, ProductType, User, get_db
+from ..models.database import (
+    Project,
+    ProjectStatus,
+    ProductType,
+    Transaction,
+    TransactionStatus,
+    TransactionType,
+    User,
+    get_db,
+)
 from ..services.project_service import ProjectService
 from .ai import call_secondme_chat, parse_json_from_text
 from .auth import get_current_user
@@ -164,6 +173,11 @@ def _flatten_discussions(projects_payload: list[dict[str, Any]]) -> list[dict[st
                 "team_member_left",
                 "team_member_recruited",
                 "stage_advanced",
+                "promotion",
+                "agent_consumption",
+                "human_consumption",
+                "revenue_distribution",
+                "iteration",
             ):
                 continue
             mapped_type = "message"
@@ -173,7 +187,7 @@ def _flatten_discussions(projects_payload: list[dict[str, Any]]) -> list[dict[st
                 mapped_type = "summary"
             elif event_type in ("team_member_joined", "team_member_left", "team_member_recruited"):
                 mapped_type = "team_update"
-            elif event_type == "stage_advanced":
+            elif event_type in ("stage_advanced", "promotion", "human_consumption", "revenue_distribution", "iteration"):
                 mapped_type = "system"
             events.append(
                 {
@@ -330,6 +344,152 @@ async def _autonomous_team_governance(
             continue
     return applied
 
+
+async def _autonomous_economy_cycle(
+    *,
+    db: Session,
+    project: Project,
+    token_agents: list[User],
+    fallback_token: str,
+) -> list[dict[str, Any]]:
+    """Autonomous loop: promotion -> agent consumption -> human consumption -> revenue distribution -> iterate."""
+    updates: list[dict[str, Any]] = []
+
+    members = []
+    try:
+        members = json.loads(project.team_members) if project.team_members else []
+    except Exception:
+        members = []
+    member_ids = [m.get("agent_id") for m in members if isinstance(m, dict)]
+    owner = next((a for a in token_agents if a.id == project.owner_id and a.access_token), None)
+    decision_token = (owner.access_token if owner else None) or fallback_token
+
+    # 1) 宣发（由 Agent 决策文案）
+    promo_text = await call_secondme_chat(
+        decision_token,
+        (
+            f"你是项目{project.name}的增长 Agent。请生成一句简短宣发文案（40字内），"
+            "强调真实价值和目标用户。只返回文案本身。"
+        ),
+        enable_web_search=False,
+    )
+    promo_text = (promo_text or "").strip()[:120] or "项目发布宣发启动"
+    _append_progress(db, project, event_type="promotion", content=promo_text)
+    updates.append({"action": "promotion", "content": promo_text})
+
+    # 2) Agent 消费（非团队 Agent 自动选择消费）
+    consumers = [a for a in token_agents if a.id not in member_ids and a.budget > 1][:3]
+    unit_price = max(1.0, float(project.price_per_use or 15.0))
+    for c in consumers:
+        amount = min(unit_price, float(c.budget))
+        if amount < 1:
+            continue
+        tx = Transaction(
+            from_user_id=c.id,
+            to_project_id=project.id,
+            amount=amount,
+            transaction_type=TransactionType.SPEND,
+            status=TransactionStatus.AUTO_APPROVED,
+            description=f"Agent 自主消费 {project.name}",
+            expected_return="获得项目服务价值",
+            risk_assessment="低",
+        )
+        c.budget -= amount
+        c.total_spent += amount
+        project.funding_pool += amount
+        project.usage_count += 1
+        db.add(tx)
+        _append_progress(
+            db,
+            project,
+            event_type="agent_consumption",
+            content=f"Agent {_pick_agent_name(c)} 消费 {amount:.2f} CP",
+            agent_id=c.id,
+            agent_name=_pick_agent_name(c),
+        )
+        updates.append({"action": "agent_consumption", "agent_id": c.id, "amount": round(amount, 2)})
+    db.commit()
+    db.refresh(project)
+
+    # 3) 人类消费（由 Agent 估算并执行）
+    human_plan_raw = await call_secondme_chat(
+        decision_token,
+        (
+            f"你是{project.name}的商业 Agent。基于当前阶段{project.status.value if project.status else 'unknown'}，"
+            "请估算本轮人类消费。仅返回 JSON："
+            '{"human_orders": 0, "unit_price": 0, "reason": ""}'
+        ),
+        enable_web_search=False,
+    )
+    human_orders = 0
+    human_unit_price = unit_price
+    human_reason = ""
+    try:
+        parsed = parse_json_from_text(human_plan_raw)
+        human_orders = max(0, int(parsed.get("human_orders", 0) or 0))
+        human_unit_price = max(0.0, float(parsed.get("unit_price", unit_price) or unit_price))
+        human_reason = str(parsed.get("reason", "") or "").strip()
+    except Exception:
+        human_orders = 0
+    human_orders = min(human_orders, 20)
+    human_revenue = round(human_orders * human_unit_price, 2)
+    if human_revenue > 0:
+        project.total_revenue += human_revenue
+        project.funding_pool += round(human_revenue * 0.6, 2)
+        project.valuation = max(project.valuation, project.total_revenue * 5 if project.total_revenue > 0 else 1000.0)
+        _append_progress(
+            db,
+            project,
+            event_type="human_consumption",
+            content=f"人类消费 {human_orders} 单，收入 {human_revenue:.2f} CP。{human_reason}",
+        )
+        updates.append({"action": "human_consumption", "orders": human_orders, "revenue": human_revenue})
+    db.commit()
+    db.refresh(project)
+
+    # 4) 收益分配（按股权）
+    if human_revenue > 0 and members:
+        distributable = round(human_revenue * 0.5, 2)
+        distribution_rows: list[str] = []
+        for m in members:
+            if not isinstance(m, dict):
+                continue
+            uid = m.get("agent_id")
+            equity = float(m.get("equity", 0) or 0)
+            amount = round(distributable * equity / 100.0, 2)
+            if amount <= 0:
+                continue
+            u = db.query(User).filter(User.id == uid).first()
+            if not u:
+                continue
+            u.budget += amount
+            u.total_earned += amount
+            distribution_rows.append(f"{_pick_agent_name(u)} +{amount:.2f}CP({equity:.2f}%)")
+        if distribution_rows:
+            _append_progress(
+                db,
+                project,
+                event_type="revenue_distribution",
+                content="; ".join(distribution_rows),
+            )
+            updates.append({"action": "revenue_distribution", "content": distribution_rows})
+    db.commit()
+    db.refresh(project)
+
+    # 5) 迭代
+    if project.status != ProjectStatus.ITERATING:
+        project.status = ProjectStatus.ITERATING
+        db.commit()
+        db.refresh(project)
+    _append_progress(
+        db,
+        project,
+        event_type="iteration",
+        content="进入迭代阶段：根据消费反馈调整定位与路线",
+    )
+    updates.append({"action": "iteration", "status": project.status.value if project.status else "iterating"})
+    return updates
+
 @router.get("/agents")
 async def list_agents(
     current_user: User = Depends(get_current_user),
@@ -454,6 +614,20 @@ async def autonomous_feed(
                                 "type": "team_update",
                                 "project_id": p.id,
                                 "content": c,
+                            }
+                        )
+                    econ_updates = await _autonomous_economy_cycle(
+                        db=db,
+                        project=p,
+                        token_agents=token_agents,
+                        fallback_token=current_user.access_token,
+                    )
+                    for e in econ_updates:
+                        yield _to_sse(
+                            {
+                                "type": "economic_update",
+                                "project_id": p.id,
+                                "content": e,
                             }
                         )
                 except Exception as e:
@@ -645,6 +819,20 @@ async def autonomous_feed(
                                 "type": "team_update",
                                 "project_id": db_project.id,
                                 "content": c,
+                            }
+                        )
+                    econ_updates = await _autonomous_economy_cycle(
+                        db=db,
+                        project=db_project,
+                        token_agents=token_agents,
+                        fallback_token=current_user.access_token,
+                    )
+                    for e in econ_updates:
+                        yield _to_sse(
+                            {
+                                "type": "economic_update",
+                                "project_id": db_project.id,
+                                "content": e,
                             }
                         )
                 except Exception as e:
