@@ -747,6 +747,8 @@ async def autonomous_feed(
                         "product_type": dev_result["product_type_detail"],
                         "endpoint": dev_result["endpoint"],
                         "code_length": dev_result["code_length"],
+                        "product_code": db_project.product_code or "",  # send code to frontend for local preview
+                        "product_name": db_project.name or "",
                     })
                 except Exception as exc:
                     yield _to_sse({"type": "error", "content": f"开发失败(#{db_project.id}): {str(exc)[:120]}"})

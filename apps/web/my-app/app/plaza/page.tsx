@@ -198,16 +198,13 @@ export default function PlazaPage() {
                     );
                   }
                   if (msg.type === 'product_deployed') {
-                    const c = msg.content as any;
-                    const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
-                    const previewUrl = `${apiUrl}/sandbox/product/${msg.project_id || c?.db_project_id}/preview`;
+                    const m = msg as any;
+                    const dbId = m.db_project_id || msg.project_id;
                     return (
                       <div key={i} className="text-xs text-green-700 bg-green-50 rounded p-2 flex items-center gap-2">
-                        <span>🚀 产品已部署（项目 {msg.project_id}）</span>
-                        {(c?.product_type === 'web_app' || (msg as any).product_type === 'web_app') && (
-                          <a href={previewUrl} target="_blank" rel="noopener noreferrer"
-                             className="underline text-blue-600 hover:text-blue-800">打开预览 →</a>
-                        )}
+                        <span>🚀 产品已部署（{m.product_name || msg.project_id}）· {m.product_type} · {m.code_length}字符</span>
+                        <a href={`/product/${dbId}`} target="_blank" rel="noopener noreferrer"
+                           className="underline text-blue-600 hover:text-blue-800 font-medium">打开产品 →</a>
                       </div>
                     );
                   }

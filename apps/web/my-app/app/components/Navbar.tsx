@@ -68,6 +68,19 @@ function startGlobalAgentStream() {
             if (!line) continue;
             try {
               const evt = JSON.parse(line.slice(6));
+              // If product deployed, save code to localStorage for local preview
+              if (evt.type === 'product_deployed' && evt.product_code) {
+                try {
+                  const products = JSON.parse(localStorage.getItem('clawthon_products') || '{}');
+                  products[String(evt.db_project_id)] = {
+                    code: evt.product_code,
+                    product_type: evt.product_type,
+                    name: evt.product_name || '',
+                    project_id: evt.project_id,
+                  };
+                  localStorage.setItem('clawthon_products', JSON.stringify(products));
+                } catch { }
+              }
               // Broadcast to all pages
               window.dispatchEvent(new CustomEvent('plaza-event', { detail: evt }));
             } catch { /* skip bad JSON */ }

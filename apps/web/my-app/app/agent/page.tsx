@@ -417,13 +417,9 @@ export default function AgentWorkspacePage() {
                         </div>
                       )}
                       <div className="mt-3 flex justify-end gap-2">
-                        {/* Product sandbox links */}
+                        {/* Product sandbox links — local preview from localStorage */}
                         {p.progress?.some((e: any) => e.event_type === 'product_deployed') && (
-                          <a
-                            href={`${(process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim()}/sandbox/product/${p.id}/preview`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
+                          <a href={`/product/${p.id}`} target="_blank" rel="noopener noreferrer">
                             <Button size="sm" variant="default">🚀 打开产品</Button>
                           </a>
                         )}
