@@ -145,13 +145,36 @@ async def develop_product_code(
         prd_summary = logic.get("prd_summary", f"{title}：{subtitle}")
         mock_responses = logic.get("mock_responses", ["这是模拟结果，实际产品需要后端支持。"])
         mock_json = json.dumps(mock_responses, ensure_ascii=False)
-        mode_badge = '<div style="background:#fef3c7;color:#92400e;padding:8px 16px;border-radius:8px;font-size:13px;margin-top:12px;text-align:center">📋 PRD + Mock 演示 · 完整功能需要后端服务支持</div>'
+        mock_features_str = assess.get("mock_features", [])
+        mock_list_html = "".join(f"<li>{mf}</li>" for mf in mock_features_str[:5]) if mock_features_str else "<li>需要后端服务支持</li>"
+        features_detail_html = "".join(f"<li>{f}</li>" for f in features[:5])
+        prd_escaped = prd_summary.replace("'", "\\'").replace("\n", " ")
+
+        mode_badge = f'''<div style="background:#fef3c7;color:#92400e;padding:8px 16px;border-radius:8px;font-size:13px;margin-top:12px;text-align:center">📋 PRD + Mock 演示 · 完整功能需要后端服务支持</div>
+</div>
+<div class="card" style="border-left:4px solid #2563eb">
+  <label>📄 产品需求文档 (PRD)</label>
+  <div style="font-size:14px;line-height:1.8;color:#334155">
+    <p style="margin-bottom:12px">{prd_summary}</p>
+    <div style="margin:12px 0">
+      <strong>核心功能</strong>
+      <ul style="margin:8px 0 8px 20px;color:#475569">{features_detail_html}</ul>
+    </div>
+    <div style="margin:12px 0">
+      <strong>⚠️ 需要后端实现的部分</strong>
+      <ul style="margin:8px 0 8px 20px;color:#92400e">{mock_list_html}</ul>
+    </div>
+    <div style="margin-top:12px;padding:10px;background:#f0fdf4;border-radius:8px;font-size:12px;color:#166534">
+      ✅ 以下是 Mock 演示界面 — 可以体验交互流程，数据为模拟生成
+    </div>
+  </div>'''
+
         process_script = f"""var _mockResponses = {mock_json};
 var _mockIdx = 0;
 function processInput(text) {{
   var r = _mockResponses[_mockIdx % _mockResponses.length];
   _mockIdx++;
-  return '<div style="margin-bottom:12px"><strong>📋 PRD 摘要</strong><p style="color:#64748b;margin:8px 0">{prd_summary}</p></div><hr style="border:none;border-top:1px solid #e2e8f0;margin:12px 0"><div><strong>🎯 模拟结果</strong><p style="margin:8px 0">' + r + '</p><p style="color:#94a3b8;font-size:12px;margin-top:8px">💡 这是 Mock 演示数据。输入内容：' + text.substring(0,50) + (text.length>50?'...':'') + ' (' + text.length + '字符)</p></div>';
+  return '<div><strong>🎯 模拟结果</strong><p style="margin:8px 0">' + r + '</p><p style="color:#94a3b8;font-size:12px;margin-top:8px">💡 Mock 演示数据 · 输入：' + text.substring(0,30) + (text.length>30?'...':'') + '</p></div>';
 }}"""
 
     if product_type == "web_app":
