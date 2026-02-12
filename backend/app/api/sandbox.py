@@ -81,47 +81,83 @@ async def develop_product_code(
     except Exception:
         pass
 
-    # Generate actual code
+    # Generate actual code with VERY specific functional requirements
+    desc = (project.description or project.name or "工具")[:300]
+
     if product_type == "web_app":
-        code_prompt = (
-            f"你是一个全栈开发 Agent。请为项目「{project.name}」开发一个完整的单页 Web 应用。\n"
-            f"项目描述：{project.description}\n\n"
-            "要求：\n"
-            "1. 输出一个完整的 HTML 文件（包含 CSS 和 JS，全部内联）\n"
-            "2. 界面美观，使用现代设计（圆角、渐变、阴影）\n"
-            "3. 必须有真实的交互功能（不是静态页面）\n"
-            "4. 顶部显示产品名称和简介\n"
-            "5. 底部显示 'Powered by Clawthon AI Agent'\n"
-            "6. 响应式设计，手机也能用\n\n"
-            "只输出 HTML 代码，不要任何解释。以 <!DOCTYPE html> 开头。"
-        )
+        code_prompt = f"""你是一个资深全栈开发工程师。请为「{project.name}」开发一个真正可用的单页 Web 应用。
+
+项目描述：{desc}
+
+## 严格要求（缺一不可）：
+
+1. 输出完整的 HTML 文件（CSS 和 JS 全部内联在 <style> 和 <script> 标签中）
+2. 以 <!DOCTYPE html> 开头，以 </html> 结尾
+3. 必须包含以下真实可用的功能区域：
+   - 顶部：产品名称 + 一句话描述
+   - 主体功能区：至少包含一个输入框/表单 + 一个操作按钮 + 一个结果展示区
+   - 按钮点击后必须执行真实的 JavaScript 逻辑（计算/转换/分析/生成），并把结果显示在页面上
+   - 如果是数据分析类：要有表格或图表展示
+   - 如果是工具类：要有输入→处理→输出的完整流程
+   - 如果是内容类：要有搜索/筛选/展示功能
+4. 样式要求：白色背景卡片，带阴影和圆角，字体用 system-ui，主色调蓝色(#2563eb)
+5. 底部显示 "Powered by Clawthon AI Agent · {project.name}"
+6. 响应式设计
+
+## 禁止：
+- 不要只放一个渐变背景
+- 不要只有标题没有功能
+- 不要有任何"Coming Soon"或"TODO"
+- 不要引用任何外部CDN（全部自己写）
+
+只输出 HTML 代码，不要任何解释文字。"""
+
     elif product_type == "agent_skill":
-        code_prompt = (
-            f"你是一个 Agent 技能开发者。请为项目「{project.name}」开发一个 Agent Skill。\n"
-            f"项目描述：{project.description}\n\n"
-            "要求：\n"
-            "1. 输出一个 Python 函数，函数名为 `execute_skill`\n"
-            "2. 函数签名：`def execute_skill(input_data: dict) -> dict`\n"
-            "3. input_data 包含用户传入的参数\n"
-            "4. 返回值是一个 dict，包含处理结果\n"
-            "5. 函数内不要使用任何外部库（只用标准库）\n"
-            "6. 在函数开头加注释说明输入输出格式\n"
-            "7. 包含错误处理\n\n"
-            "只输出 Python 代码，不要解释。"
-        )
+        code_prompt = f"""你是一个 Agent 技能开发工程师。请为「{project.name}」开发一个真正可执行的 Agent Skill。
+
+项目描述：{desc}
+
+## 严格要求：
+
+```python
+def execute_skill(input_data: dict) -> dict:
+    \"\"\"
+    输入: input_data 字典，包含具体参数
+    输出: 包含处理结果的字典
+    \"\"\"
+    # 你的实现
+```
+
+1. 函数必须能真正处理输入并产出有意义的输出
+2. 必须包含至少 3 个具体的处理步骤（不是简单的 echo）
+3. 处理逻辑要与项目描述匹配（如文本分析就要真的做分析，数据处理就要真的处理数据）
+4. 只用 Python 标准库（不能 import 第三方包）
+5. 完善的错误处理（try/except）
+6. 在函数顶部注释清楚输入格式和输出格式
+
+只输出 Python 代码，不要解释。"""
+
     else:  # mcp_service
-        code_prompt = (
-            f"你是一个 MCP 服务开发者。请为项目「{project.name}」开发一个 MCP 兼容服务。\n"
-            f"项目描述：{project.description}\n\n"
-            "要求：\n"
-            "1. 输出一个 Python 函数，函数名为 `handle_request`\n"
-            "2. 函数签名：`def handle_request(method: str, params: dict) -> dict`\n"
-            "3. 支持至少 2 个 method\n"
-            "4. 返回 JSON-RPC 格式的响应\n"
-            "5. 函数内不要使用任何外部库\n"
-            "6. 包含错误处理\n\n"
-            "只输出 Python 代码，不要解释。"
-        )
+        code_prompt = f"""你是一个 MCP 服务开发工程师。请为「{project.name}」开发一个可调用的 MCP 兼容服务。
+
+项目描述：{desc}
+
+## 严格要求：
+
+```python
+def handle_request(method: str, params: dict) -> dict:
+    \"\"\"支持多个 method 的 MCP 服务\"\"\"
+    # 你的实现
+```
+
+1. 至少支持 3 个不同的 method（如 analyze, transform, query 等）
+2. 每个 method 有真实的处理逻辑
+3. 返回格式：{{"result": ..., "status": "ok"}}
+4. 错误返回：{{"error": "描述", "status": "error"}}
+5. 只用 Python 标准库
+6. 在函数顶部注释说明支持的 methods 及参数格式
+
+只输出 Python 代码，不要解释。"""
 
     code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
     code = _clean_code(code, product_type)
