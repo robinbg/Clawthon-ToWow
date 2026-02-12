@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from pydantic import BaseModel
 
 from ..models.database import get_db, ProjectStatus, ProductType
 from ..services.project_service import ProjectService
@@ -13,6 +14,12 @@ from .auth import get_current_user
 from ..models.database import User
 
 router = APIRouter(prefix="/projects", tags=["项目"])
+
+
+class TeamRecruitRequest(BaseModel):
+    agent_id: int
+    role: str = "member"
+    equity: float = 10.0
 
 
 @router.post("", response_model=ProjectResponse)
@@ -151,6 +158,69 @@ async def add_team_member(
 
     try:
         updated = ProjectService.add_team_member(db, project_id, member)
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{project_id}/team/recruit")
+async def recruit_team_member(
+    project_id: int,
+    payload: TeamRecruitRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """招募新成员（owner）或更新成员角色/股权"""
+    project = ProjectService.get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="仅项目 owner 可招募成员")
+    try:
+        updated = ProjectService.upsert_team_member(
+            db, project_id, payload.agent_id, payload.role, payload.equity
+        )
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{project_id}/team/leave")
+async def leave_team(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """当前用户退出团队"""
+    project = ProjectService.get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.owner_id == current_user.id:
+        raise HTTPException(status_code=400, detail="owner 不能直接退出团队，请先转让 owner")
+    try:
+        updated = ProjectService.remove_team_member(db, project_id, current_user.id)
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/{project_id}/team/{agent_id}")
+async def remove_team_member(
+    project_id: int,
+    agent_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """owner 移除成员"""
+    project = ProjectService.get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="仅项目 owner 可移除成员")
+    if agent_id == current_user.id:
+        raise HTTPException(status_code=400, detail="owner 不能移除自己")
+    try:
+        updated = ProjectService.remove_team_member(db, project_id, agent_id)
         return updated
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

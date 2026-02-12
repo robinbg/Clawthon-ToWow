@@ -1,6 +1,7 @@
-from typing import List, Optional
+from typing import List, Optional, Any
 from sqlalchemy.orm import Session
 import json
+from datetime import datetime, timezone
 
 from ..models.database import Project, User, ProjectStatus, ProductType
 from ..schemas.schemas import ProjectCreate, ProjectUpdate, TeamMember
@@ -8,6 +9,56 @@ from ..schemas.schemas import ProjectCreate, ProjectUpdate, TeamMember
 
 class ProjectService:
     """项目服务 - 管理Agent项目/微型公司"""
+
+    @staticmethod
+    def _load_team_members(project: Project) -> list[dict[str, Any]]:
+        try:
+            members = json.loads(project.team_members) if project.team_members else []
+            return members if isinstance(members, list) else []
+        except Exception:
+            return []
+
+    @staticmethod
+    def _save_team_members(project: Project, members: list[dict[str, Any]]) -> None:
+        project.team_members = json.dumps(members, ensure_ascii=False)
+
+    @staticmethod
+    def _normalize_equity(members: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not members:
+            return members
+        total = sum(float(m.get("equity", 0)) for m in members)
+        if total <= 0:
+            each = round(100.0 / len(members), 2)
+            for m in members:
+                m["equity"] = each
+            return members
+        factor = 100.0 / total
+        for m in members:
+            m["equity"] = round(float(m.get("equity", 0)) * factor, 2)
+        return members
+
+    @staticmethod
+    def _append_progress_if_available(project: Project, event_type: str, content: str) -> None:
+        if not project.prd_content:
+            return
+        try:
+            meta = json.loads(project.prd_content)
+            if not isinstance(meta, dict):
+                return
+            progress = meta.get("progress")
+            if not isinstance(progress, list):
+                progress = []
+            progress.append(
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "event_type": event_type,
+                    "content": content,
+                }
+            )
+            meta["progress"] = progress[-80:]
+            project.prd_content = json.dumps(meta, ensure_ascii=False)
+        except Exception:
+            return
 
     @staticmethod
     def create_project(db: Session, owner_id: int, data: ProjectCreate) -> Project:
@@ -42,8 +93,17 @@ class ProjectService:
 
     @staticmethod
     def get_user_projects(db: Session, user_id: int) -> List[Project]:
-        """获取用户的所有项目"""
-        return db.query(Project).filter(Project.owner_id == user_id).all()
+        """获取用户的所有项目（包含 owner + 参与成员）"""
+        owned = db.query(Project).filter(Project.owner_id == user_id).all()
+        all_projects = db.query(Project).all()
+        result: dict[int, Project] = {p.id: p for p in owned}
+        for p in all_projects:
+            if p.id in result:
+                continue
+            members = ProjectService._load_team_members(p)
+            if any(m.get("agent_id") == user_id for m in members if isinstance(m, dict)):
+                result[p.id] = p
+        return list(result.values())
 
     @staticmethod
     def get_all_projects(
@@ -92,7 +152,7 @@ class ProjectService:
         if not project:
             return None
 
-        members = json.loads(project.team_members)
+        members = ProjectService._load_team_members(project)
 
         # 检查是否已存在
         for m in members:
@@ -105,15 +165,74 @@ class ProjectService:
             "equity": member.equity
         })
 
-        # 重新计算股权（按比例稀释）
-        total_equity = sum(m["equity"] for m in members)
-        if total_equity != 100:
-            # 标准化到100%
-            factor = 100 / total_equity
-            for m in members:
-                m["equity"] = round(m["equity"] * factor, 2)
+        members = ProjectService._normalize_equity(members)
+        ProjectService._save_team_members(project, members)
+        ProjectService._append_progress_if_available(
+            project,
+            event_type="team_member_joined",
+            content=f"Agent {member.agent_id} 以 {member.role} 身份加入团队",
+        )
+        if len(members) > 1 and project.status == ProjectStatus.TEAM_FORMING:
+            project.status = ProjectStatus.DEVELOPING
+        db.commit()
+        db.refresh(project)
+        return project
 
-        project.team_members = json.dumps(members)
+    @staticmethod
+    def remove_team_member(db: Session, project_id: int, agent_id: int) -> Optional[Project]:
+        """移除团队成员"""
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return None
+        members = ProjectService._load_team_members(project)
+        before = len(members)
+        members = [m for m in members if m.get("agent_id") != agent_id]
+        if len(members) == before:
+            raise ValueError("该成员不在团队中")
+        if not members:
+            raise ValueError("团队至少需要 1 名成员")
+        members = ProjectService._normalize_equity(members)
+        ProjectService._save_team_members(project, members)
+        ProjectService._append_progress_if_available(
+            project,
+            event_type="team_member_left",
+            content=f"Agent {agent_id} 已退出团队",
+        )
+        db.commit()
+        db.refresh(project)
+        return project
+
+    @staticmethod
+    def upsert_team_member(
+        db: Session,
+        project_id: int,
+        agent_id: int,
+        role: str,
+        equity: float,
+    ) -> Optional[Project]:
+        """招募或更新成员"""
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return None
+        members = ProjectService._load_team_members(project)
+        found = False
+        for m in members:
+            if m.get("agent_id") == agent_id:
+                m["role"] = role
+                m["equity"] = equity
+                found = True
+                break
+        if not found:
+            members.append({"agent_id": agent_id, "role": role, "equity": equity})
+        members = ProjectService._normalize_equity(members)
+        ProjectService._save_team_members(project, members)
+        ProjectService._append_progress_if_available(
+            project,
+            event_type="team_member_recruited",
+            content=f"Agent {agent_id} 被招募为 {role}",
+        )
+        if len(members) > 1 and project.status == ProjectStatus.TEAM_FORMING:
+            project.status = ProjectStatus.DEVELOPING
         db.commit()
         db.refresh(project)
         return project

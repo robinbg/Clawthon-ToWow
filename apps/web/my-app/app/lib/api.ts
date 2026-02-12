@@ -103,6 +103,25 @@ class ApiClient {
     return this.request<Project[]>(`/projects/marketplace${params}`);
   }
 
+  async recruitTeamMember(projectId: number, payload: { agent_id: number; role: string; equity: number }): Promise<Project> {
+    return this.request<Project>(`/projects/${projectId}/team/recruit`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async removeTeamMember(projectId: number, agentId: number): Promise<Project> {
+    return this.request<Project>(`/projects/${projectId}/team/${agentId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async leaveTeam(projectId: number): Promise<Project> {
+    return this.request<Project>(`/projects/${projectId}/team/leave`, {
+      method: 'POST',
+    });
+  }
+
   // 交易相关
   async getDashboard(): Promise<DashboardData> {
     return this.request<DashboardData>('/transactions/dashboard');

@@ -38,6 +38,7 @@ const statusColors: Record<string, string> = {
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [meId, setMeId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [newProject, setNewProject] = useState({
@@ -52,6 +53,8 @@ export default function ProjectsPage() {
 
   async function loadProjects() {
     try {
+      const me = await api.getMe();
+      setMeId(me.id);
       const data = await api.getMyProjects();
       setProjects(data);
     } catch (err) {
@@ -153,7 +156,7 @@ export default function ProjectsPage() {
         ) : (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {projects.map((project) => (
-              <ProjectCard key={project.id} project={project} onUpdate={loadProjects} />
+              <ProjectCard key={project.id} project={project} onUpdate={loadProjects} meId={meId} />
             ))}
           </div>
         )}
@@ -162,14 +165,20 @@ export default function ProjectsPage() {
   );
 }
 
-function ProjectCard({ project, onUpdate }: { project: Project; onUpdate: () => void }) {
+function ProjectCard({ project, onUpdate, meId }: { project: Project; onUpdate: () => void; meId: number | null }) {
   const [showManage, setShowManage] = useState(false);
   const [price, setPrice] = useState(String(project.price_per_use || 0));
+  const [recruitAgentId, setRecruitAgentId] = useState('');
+  const [recruitRole, setRecruitRole] = useState('member');
+  const [recruitEquity, setRecruitEquity] = useState('10');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
 
   const isAgentProduct = ['agent_skill', 'agent_mcp', 'agent_service'].includes(project.product_type);
   const canLaunch = project.status !== 'launched' && project.status !== 'iterating';
+  const isOwner = meId != null && project.owner_id === meId;
+  const members = Array.isArray(project.team_members) ? project.team_members : [];
+  const isMember = meId != null && members.some((m) => m.agent_id === meId);
 
   async function handleLaunch() {
     setSaving(true);
@@ -193,6 +202,52 @@ function ProjectCard({ project, onUpdate }: { project: Project; onUpdate: () => 
       });
       setMsg('✅ 价格已更新');
       onUpdate();
+    } catch (err: any) {
+      setMsg(`❌ ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRecruitMember() {
+    if (!recruitAgentId.trim()) return;
+    setSaving(true);
+    try {
+      await api.recruitTeamMember(project.id, {
+        agent_id: Number(recruitAgentId),
+        role: recruitRole,
+        equity: Number(recruitEquity),
+      });
+      setMsg('✅ 团队成员已更新');
+      setRecruitAgentId('');
+      onUpdate();
+    } catch (err: any) {
+      setMsg(`❌ ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRemoveMember(agentId: number) {
+    setSaving(true);
+    try {
+      await api.removeTeamMember(project.id, agentId);
+      setMsg('✅ 成员已移除');
+      onUpdate();
+    } catch (err: any) {
+      setMsg(`❌ ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleLeaveTeam() {
+    setSaving(true);
+    try {
+      await api.leaveTeam(project.id);
+      setMsg('✅ 你已退出团队');
+      onUpdate();
+      setShowManage(false);
     } catch (err: any) {
       setMsg(`❌ ${err.message}`);
     } finally {
@@ -271,6 +326,47 @@ function ProjectCard({ project, onUpdate }: { project: Project; onUpdate: () => 
               <p>总收入：{project.total_revenue?.toFixed(2)} CP</p>
               <p>使用次数：{project.usage_count || 0} 次</p>
             </div>
+
+            <Separator />
+            <div>
+              <p className="text-sm font-medium mb-2">团队成员</p>
+              <div className="space-y-2">
+                {members.map((m) => (
+                  <div key={`${project.id}-${m.agent_id}`} className="flex items-center justify-between rounded border px-2 py-1.5 text-xs">
+                    <span>Agent {m.agent_id} · {m.role} · {m.equity}%</span>
+                    {isOwner && m.agent_id !== meId && (
+                      <Button size="sm" variant="ghost" className="h-6 px-2 text-red-600" onClick={() => handleRemoveMember(m.agent_id)}>
+                        移除
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {isOwner && (
+              <>
+                <Separator />
+                <div className="space-y-2">
+                  <p className="text-sm font-medium">招募 / 更新成员</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <Input type="number" placeholder="Agent ID" value={recruitAgentId} onChange={(e) => setRecruitAgentId(e.target.value)} />
+                    <Input placeholder="角色" value={recruitRole} onChange={(e) => setRecruitRole(e.target.value)} />
+                    <Input type="number" placeholder="股权%" value={recruitEquity} onChange={(e) => setRecruitEquity(e.target.value)} />
+                  </div>
+                  <Button size="sm" onClick={handleRecruitMember} disabled={saving}>保存成员变更</Button>
+                </div>
+              </>
+            )}
+
+            {!isOwner && isMember && (
+              <>
+                <Separator />
+                <Button variant="outline" className="w-full" onClick={handleLeaveTeam} disabled={saving}>
+                  退出团队
+                </Button>
+              </>
+            )}
 
             {isAgentProduct && (
               <>
