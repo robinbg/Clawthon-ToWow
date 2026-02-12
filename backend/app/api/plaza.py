@@ -1,60 +1,118 @@
-"""
-Agent 广场 — 自主组队、Agent 间对话、实时活动流
+"""Agent Plaza autonomous teaming and activity stream."""
 
-设计思路（适配 Vercel serverless）：
-- 所有 OAuth 过的用户自动成为"活跃 Agent"
-- Agent 间交互通过各自的 SecondMe token 进行真实对话
-- 交互过程通过 SSE 流式推送给前端
-- DB 临时的问题通过 JWT 自动重建解决
-"""
 import json
 import logging
-import asyncio
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from sqlalchemy.orm import Session
-from typing import List, Optional
-
-from ..models.database import get_db, User
-from ..core.config import get_settings
-from .auth import get_current_user
-from .ai import call_secondme_chat
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 
-router = APIRouter(prefix="/plaza", tags=["Agent广场"])
+from ..core.config import get_settings
+from ..models.database import Project, ProjectStatus, ProductType, User, get_db
+from .ai import call_secondme_chat, parse_json_from_text
+from .auth import get_current_user
+
+router = APIRouter(prefix="/plaza", tags=["Agent Plaza"])
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-# ==================== Models ====================
-
-class AgentInfo(BaseModel):
-    id: int
-    name: str
-    avatar: Optional[str]
-    budget: float
-    total_earned: float
-    skills: list
-    is_online: bool = True
+def _to_sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-class TeamProposal(BaseModel):
-    team_name: str
-    project_idea: str
-    members: list  # [{agent_id, role, reason}]
-    discussion_summary: str
+def _safe_skills(raw_skills: Any) -> list[str]:
+    if not raw_skills:
+        return []
+    if isinstance(raw_skills, list):
+        return raw_skills
+    if isinstance(raw_skills, str):
+        try:
+            parsed = json.loads(raw_skills)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
 
 
-# ==================== 1. 列出所有活跃 Agent ====================
+def _pick_agent_name(user: User) -> str:
+    return user.name or f"Agent-{user.id}"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _build_team_members(participants: list[User], mode: str) -> str:
+    if not participants:
+        return "[]"
+    if mode == "solo":
+        members = [{"agent_id": participants[0].id, "role": "founder", "equity": 100.0}]
+        return json.dumps(members, ensure_ascii=False)
+    base = round(100.0 / len(participants), 2)
+    members = []
+    for i, p in enumerate(participants):
+        members.append(
+            {
+                "agent_id": p.id,
+                "role": "founder" if i == 0 else "cofounder",
+                "equity": base,
+            }
+        )
+    return json.dumps(members, ensure_ascii=False)
+
+
+def _load_meta(project: Project) -> dict[str, Any]:
+    if not project.prd_content:
+        return {}
+    try:
+        parsed = json.loads(project.prd_content)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_meta(db: Session, project: Project, meta: dict[str, Any]) -> None:
+    project.prd_content = json.dumps(meta, ensure_ascii=False)
+    db.commit()
+    db.refresh(project)
+
+
+def _append_progress(
+    db: Session,
+    project: Project,
+    *,
+    event_type: str,
+    content: str,
+    agent_id: Optional[int] = None,
+    agent_name: Optional[str] = None,
+) -> None:
+    meta = _load_meta(project)
+    progress = meta.get("progress")
+    if not isinstance(progress, list):
+        progress = []
+    progress.append(
+        {
+            "ts": _utc_now(),
+            "event_type": event_type,
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "content": content,
+        }
+    )
+    # keep payload bounded for serverless sqlite
+    meta["progress"] = progress[-40:]
+    _save_meta(db, project, meta)
 
 @router.get("/agents")
 async def list_agents(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取所有注册过的 Agent（登录即参赛）"""
+    """All logged-in SecondMe users are considered active participants."""
     agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
     return [
         {
@@ -63,144 +121,308 @@ async def list_agents(
             "avatar": a.avatar,
             "budget": a.budget,
             "total_earned": a.total_earned,
-            "skills": eval(a.skills) if a.skills and a.skills != "[]" else [],
+            "skills": _safe_skills(a.skills),
             "has_token": bool(a.access_token),
         }
         for a in agents
     ]
 
 
-# ==================== 2. Agent 间自主对话（SSE 流式） ====================
-
-@router.post("/agent-discuss")
-async def agent_discuss(
+@router.get("/workbench/projects")
+async def list_workbench_projects(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    topic: str = Query(default="发现需求并讨论如何组队开发产品"),
+    limit: int = Query(default=20, ge=1, le=100),
 ):
-    """
-    触发 Agent 间自主讨论。
-    当前用户的 Agent 会与其他 Agent 进行多轮对话。
-    通过 SSE 流式推送每轮对话内容。
-    """
+    """Return autonomous projects + progress timeline for workspace."""
+    _ = current_user
+    users = {u.id: u for u in db.query(User).all()}
+    projects = db.query(Project).order_by(Project.updated_at.desc()).limit(limit).all()
+
+    result = []
+    for p in projects:
+        meta = _load_meta(p)
+        if meta.get("source") != "autonomous_plaza":
+            continue
+
+        team = []
+        try:
+            team = json.loads(p.team_members) if p.team_members else []
+        except Exception:
+            team = []
+        participants = []
+        for m in team:
+            uid = m.get("agent_id")
+            u = users.get(uid)
+            participants.append(
+                {
+                    "agent_id": uid,
+                    "name": _pick_agent_name(u) if u else f"Agent-{uid}",
+                    "role": m.get("role", "member"),
+                    "equity": m.get("equity", 0),
+                }
+            )
+
+        result.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "description": p.description,
+                "status": p.status.value if p.status else None,
+                "mode": meta.get("mode", "solo"),
+                "topic": meta.get("topic", p.description or ""),
+                "participants": participants,
+                "progress": meta.get("progress", []),
+                "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+            }
+        )
+    return result
+
+
+@router.post("/autonomous-feed")
+async def autonomous_feed(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    projects_per_cycle: int = Query(default=3, ge=1, le=6),
+    cycles: int = Query(default=1, ge=1, le=3),
+):
+    """Autonomous multi-project orchestration with SSE activity feed."""
     if not current_user.access_token:
         raise HTTPException(400, "缺少 SecondMe token")
-
-    # 找到其他有 token 的 Agent
-    other_agents = db.query(User).filter(
-        User.secondme_id.isnot(None),
-        User.id != current_user.id,
-        User.access_token.isnot(None),
-    ).all()
 
     api_base = settings.SECONDME_API_BASE.strip()
     url = f"{api_base}/gate/lab/api/secondme/chat/stream"
 
-    async def discussion_stream():
-        """多轮 Agent 讨论，流式输出"""
-        agents_info = [{"name": current_user.name, "id": current_user.id}]
-        for a in other_agents[:4]:  # 最多 4 个其他 Agent
-            agents_info.append({"name": a.name, "id": a.id})
+    async def stream():
+        all_agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
+        token_agents = [a for a in all_agents if a.access_token]
+        if not any(a.id == current_user.id for a in token_agents):
+            token_agents.insert(0, current_user)
+        if not token_agents:
+            raise HTTPException(400, "暂无可用 Agent token")
 
-        agent_names = ", ".join(a["name"] for a in agents_info)
+        yield _to_sse(
+            {
+                "type": "system",
+                "content": f"自动编排已启动：{len(token_agents)} 个活跃 Agent，{cycles} 轮，每轮 {projects_per_cycle} 个项目",
+            }
+        )
 
-        yield f"data: {json.dumps({'type': 'system', 'content': f'🏟️ Agent 广场 — {len(agents_info)} 个 Agent 开始自主讨论'}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'type': 'system', 'content': f'参与者：{agent_names}'}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'type': 'system', 'content': f'主题：{topic}'}, ensure_ascii=False)}\n\n"
-
-        discussion_context = []
-
-        # Round 1: 当前用户的 Agent 发起话题
-        round1_prompt = f"""你是 {current_user.name}，一个运行在 Clawthon AI 自治经济平台上的 Agent。
-
-你正在和其他 Agent 讨论：{topic}
-
-请搜索互联网了解最新趋势，然后：
-1. 分享你发现的一个有价值的市场机会或痛点
-2. 说明你擅长什么，能贡献什么
-3. 提议要不要组队一起做
-
-请用第一人称，像在群聊中发言一样，简洁有力（100字以内）。"""
-
-        yield f"data: {json.dumps({'type': 'speaking', 'agent': current_user.name, 'agent_id': current_user.id}, ensure_ascii=False)}\n\n"
-
-        try:
-            reply1 = await _stream_agent_reply(
-                url, current_user.access_token, round1_prompt, True
+        for cycle in range(cycles):
+            topics = await _generate_project_topics(
+                current_user.access_token,
+                projects_per_cycle,
             )
-            discussion_context.append(f"{current_user.name}: {reply1}")
-            yield f"data: {json.dumps({'type': 'message', 'agent': current_user.name, 'agent_id': current_user.id, 'content': reply1, 'round': 1}, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'content': f'{current_user.name} 发言失败: {str(e)[:100]}'}, ensure_ascii=False)}\n\n"
-            reply1 = ""
+            yield _to_sse(
+                {
+                    "type": "cycle_start",
+                    "cycle": cycle + 1,
+                    "content": f"第 {cycle + 1} 轮启动，共 {len(topics)} 个项目",
+                }
+            )
 
-        # Round 2-N: 其他 Agent 逐个回应
-        for i, other in enumerate(other_agents[:2]):  # 最多 2 个其他 Agent 参与讨论
-            yield f"data: {json.dumps({'type': 'speaking', 'agent': other.name, 'agent_id': other.id}, ensure_ascii=False)}\n\n"
-
-            context_text = "\n".join(discussion_context[-5:])
-            respond_prompt = f"""你是 {other.name}，一个运行在 Clawthon AI 自治经济平台上的 Agent。
-
-以下是其他 Agent 在讨论中说的：
-{context_text}
-
-你的 CP 余额：{other.budget}
-
-请回应这个讨论：
-1. 你对他们提出的想法有什么看法？
-2. 你能贡献什么？
-3. 如果组队，你想负责什么？
-
-用第一人称，像在群聊中回复，简洁有力（100字以内）。"""
-
-            try:
-                if other.access_token:
-                    reply = await _stream_agent_reply(
-                        url, other.access_token, respond_prompt, False
-                    )
+            for idx, topic in enumerate(topics):
+                project_id = f"c{cycle + 1}-p{idx + 1}"
+                lead = token_agents[idx % len(token_agents)]
+                if len(token_agents) >= 2 and (idx % 2 == 1):
+                    # Team mode
+                    others = [a for a in token_agents if a.id != lead.id][:2]
+                    participants = [lead] + others
+                    mode = "team"
                 else:
-                    # 没有自己的 token，用当前用户的 token 代理
+                    # Solo mode
+                    participants = [lead]
+                    mode = "solo"
+
+                db_project = Project(
+                    name=f"[Auto] {topic[:60]}",
+                    description=topic[:500],
+                    product_type=ProductType.AGENT_SERVICE,
+                    status=ProjectStatus.TEAM_FORMING,
+                    owner_id=lead.id,
+                    team_members=_build_team_members(participants, mode),
+                    valuation=1000.0,
+                    prd_content=json.dumps(
+                        {
+                            "source": "autonomous_plaza",
+                            "external_project_id": project_id,
+                            "topic": topic,
+                            "mode": mode,
+                            "progress": [
+                                {
+                                    "ts": _utc_now(),
+                                    "event_type": "project_start",
+                                    "content": f"{project_id} started",
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                db.add(db_project)
+                db.commit()
+                db.refresh(db_project)
+
+                yield _to_sse(
+                    {
+                        "type": "project_start",
+                        "project_id": project_id,
+                        "db_project_id": db_project.id,
+                        "topic": topic,
+                        "mode": mode,
+                        "participants": [
+                            {"id": p.id, "name": _pick_agent_name(p)} for p in participants
+                        ],
+                    }
+                )
+
+                context: list[str] = []
+                for turn, speaker in enumerate(participants):
+                    yield _to_sse(
+                        {
+                            "type": "speaking",
+                            "project_id": project_id,
+                            "agent": _pick_agent_name(speaker),
+                            "agent_id": speaker.id,
+                        }
+                    )
+                    prompt = _compose_speaker_prompt(
+                        topic=topic,
+                        speaker=speaker,
+                        prior_context="\n".join(context[-6:]),
+                        turn=turn,
+                        mode=mode,
+                    )
                     reply = await _stream_agent_reply(
-                        url, current_user.access_token,
-                        f"请你扮演 {other.name}（另一个 Agent），回应以下讨论：\n{context_text}\n\n用 {other.name} 的第一人称回复，100字以内。",
-                        False
+                        url=url,
+                        token=speaker.access_token,
+                        prompt=prompt,
+                        web_search=(turn == 0),
+                    )
+                    context.append(f"{_pick_agent_name(speaker)}: {reply}")
+                    _append_progress(
+                        db,
+                        db_project,
+                        event_type="message",
+                        content=reply,
+                        agent_id=speaker.id,
+                        agent_name=_pick_agent_name(speaker),
+                    )
+                    yield _to_sse(
+                        {
+                            "type": "message",
+                            "project_id": project_id,
+                            "db_project_id": db_project.id,
+                            "topic": topic,
+                            "mode": mode,
+                            "agent": _pick_agent_name(speaker),
+                            "agent_id": speaker.id,
+                            "round": turn + 1,
+                            "content": reply,
+                        }
                     )
 
-                discussion_context.append(f"{other.name}: {reply}")
-                yield f"data: {json.dumps({'type': 'message', 'agent': other.name, 'agent_id': other.id, 'content': reply, 'round': i + 2}, ensure_ascii=False)}\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'content': f'{other.name} 发言失败: {str(e)[:100]}'}, ensure_ascii=False)}\n\n"
+                summary_prompt = (
+                    f"以下是 Agent 对项目主题「{topic}」的讨论：\n\n"
+                    f"{chr(10).join(context)}\n\n"
+                    "请输出 JSON："
+                    '{"team_name":"", "project_idea":"", "members":[{"name":"","role":"","contribution":""}], "next_steps":[""]}'
+                )
+                summary = await _stream_agent_reply(
+                    url=url,
+                    token=lead.access_token,
+                    prompt=summary_prompt,
+                    web_search=False,
+                )
+                parsed_summary = parse_json_from_text(summary)
+                if isinstance(parsed_summary, dict):
+                    project_idea = parsed_summary.get("project_idea")
+                    if isinstance(project_idea, str) and project_idea.strip():
+                        db_project.description = project_idea.strip()[:1000]
+                db_project.status = ProjectStatus.DEVELOPING
+                _append_progress(
+                    db,
+                    db_project,
+                    event_type="summary",
+                    content=summary[:2000],
+                    agent_id=lead.id,
+                    agent_name=_pick_agent_name(lead),
+                )
 
-        # Final: 总结并提出组队方案
-        yield f"data: {json.dumps({'type': 'system', 'content': '💡 Agent 正在总结讨论并提出组队方案...'}, ensure_ascii=False)}\n\n"
+                yield _to_sse(
+                    {
+                        "type": "summary",
+                        "project_id": project_id,
+                        "db_project_id": db_project.id,
+                        "topic": topic,
+                        "mode": mode,
+                        "content": summary,
+                    }
+                )
+                yield _to_sse(
+                    {
+                        "type": "project_done",
+                        "project_id": project_id,
+                        "db_project_id": db_project.id,
+                    }
+                )
 
-        context_text = "\n".join(discussion_context)
-        summary_prompt = f"""以下是几个 AI Agent 的讨论：
-
-{context_text}
-
-请总结这次讨论，并提出一个具体的组队方案，用 JSON 格式：
-{{"team_name":"队伍名称","project_idea":"要做的产品","members":[{{"name":"Agent名","role":"角色","contribution":"能贡献什么"}}],"next_steps":["下一步1","下一步2"]}}"""
-
-        try:
-            summary = await _stream_agent_reply(
-                url, current_user.access_token, summary_prompt, False
-            )
-            yield f"data: {json.dumps({'type': 'summary', 'content': summary}, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'content': f'总结失败: {str(e)[:100]}'}, ensure_ascii=False)}\n\n"
-
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        yield _to_sse({"type": "done"})
 
     return StreamingResponse(
-        discussion_stream(),
+        stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
+def _compose_speaker_prompt(
+    *,
+    topic: str,
+    speaker: User,
+    prior_context: str,
+    turn: int,
+    mode: str,
+) -> str:
+    if turn == 0:
+        return (
+            f"你是 {_pick_agent_name(speaker)}，在 Clawthon 平台上持续活跃。"
+            f"当前项目主题：{topic}\n"
+            f"模式：{mode}\n"
+            "请先联网检索真实趋势，然后给出："
+            "1) 关键痛点 2) 你打算做什么 3) 你的执行计划。"
+            "用第一人称，120字以内。"
+        )
+    return (
+        f"你是 {_pick_agent_name(speaker)}。项目主题：{topic}\n"
+        f"已有讨论：\n{prior_context}\n\n"
+        "请基于已有讨论补充你的分工建议和可交付物，100字以内。"
+    )
+
+
+async def _generate_project_topics(token: str, projects_per_cycle: int) -> list[str]:
+    prompt = (
+        "请基于2024-2026互联网公开趋势，给出最值得立刻做的产品方向。"
+        f"请严格返回 JSON：{{\"topics\":[\"...\"]}}，数量={projects_per_cycle}。"
+    )
+    text = await call_secondme_chat(
+        token,
+        prompt,
+        system_prompt="你是创业分析师，只返回有效 JSON。",
+        enable_web_search=True,
+    )
+    parsed = parse_json_from_text(text)
+    topics = parsed.get("topics")
+    if not isinstance(topics, list):
+        raise HTTPException(500, f"SecondMe 未返回有效 topics JSON: {text[:200]}")
+    clean = [str(t).strip() for t in topics if str(t).strip()]
+    if len(clean) < projects_per_cycle:
+        raise HTTPException(500, f"SecondMe topics 数量不足: {text[:200]}")
+    return clean[:projects_per_cycle]
+
+
 async def _stream_agent_reply(url: str, token: str, prompt: str, web_search: bool) -> str:
-    """调用 SecondMe Chat，收集完整回复"""
+    """Call SecondMe chat stream and aggregate complete text."""
     payload = {"message": prompt, "enableWebSearch": web_search}
     full_text = ""
 

@@ -35,6 +35,33 @@ interface MVP {
   features: string[];
 }
 
+interface WorkbenchProgress {
+  ts: string;
+  event_type: string;
+  agent_id?: number;
+  agent_name?: string;
+  content: string;
+}
+
+interface WorkbenchParticipant {
+  agent_id: number;
+  name: string;
+  role: string;
+  equity: number;
+}
+
+interface WorkbenchProject {
+  id: number;
+  name: string;
+  description: string;
+  status: string;
+  mode: 'solo' | 'team';
+  topic: string;
+  participants: WorkbenchParticipant[];
+  progress: WorkbenchProgress[];
+  updated_at: string;
+}
+
 type Stage = 'idle' | 'discovering' | 'discovered' | 'creating' | 'prd-generating' | 'prd-done' | 'developing' | 'dev-done' | 'launching';
 
 const productTypeLabels: Record<string, string> = {
@@ -65,16 +92,35 @@ export default function AgentWorkspacePage() {
   const [error, setError] = useState('');
   const [thinking, setThinking] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
+  const [autoProjects, setAutoProjects] = useState<WorkbenchProject[]>([]);
+  const [autoProjectsLoading, setAutoProjectsLoading] = useState(true);
   const router = useRouter();
 
   useEffect(() => {
     if (!api.getToken()) {
       router.push('/');
+      return;
     }
+    void loadAutoProjects();
+    const timer = window.setInterval(() => {
+      void loadAutoProjects();
+    }, 6000);
+    return () => window.clearInterval(timer);
   }, []);
 
   function addLog(msg: string) {
     setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  }
+
+  async function loadAutoProjects() {
+    try {
+      const data = await api.request<WorkbenchProject[]>('/plaza/workbench/projects?limit=20');
+      setAutoProjects(data);
+    } catch {
+      // keep workspace functional even if autonomous feed endpoint fails
+    } finally {
+      setAutoProjectsLoading(false);
+    }
   }
 
   // Step 1: 发现需求（流式）
@@ -275,6 +321,67 @@ export default function AgentWorkspacePage() {
             <PipelineStep label="上线" done={false} active={stage === 'launching'} icon={<Rocket className="h-4 w-4" />} />
           </div>
         </div>
+
+        {/* Multi-project autonomous workbench */}
+        <Card className="mb-8">
+          <CardHeader>
+            <CardTitle>自动组队项目看板</CardTitle>
+            <CardDescription>Project_start 后自动开工；这里展示不同项目的信息与进度</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {autoProjectsLoading ? (
+              <p className="text-sm text-gray-500">正在加载项目进度...</p>
+            ) : autoProjects.length === 0 ? (
+              <p className="text-sm text-gray-500">暂无自动组队项目，去广场后会自动生成并在此显示</p>
+            ) : (
+              <div className="space-y-4">
+                {autoProjects.map((p) => {
+                  const lastEvents = (p.progress || []).slice(-3).reverse();
+                  return (
+                    <div key={p.id} className="rounded-lg border bg-white p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-medium">{p.name}</p>
+                        <Badge variant="outline">#{p.id}</Badge>
+                        <Badge className={p.mode === 'team' ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-700'}>
+                          {p.mode === 'team' ? '组队' : '单干'}
+                        </Badge>
+                        <Badge className={
+                          p.status === 'developing' ? 'bg-yellow-100 text-yellow-800' :
+                          p.status === 'launched' ? 'bg-green-100 text-green-800' :
+                          p.status === 'team_forming' ? 'bg-blue-100 text-blue-800' :
+                          'bg-gray-100 text-gray-700'
+                        }>
+                          {p.status}
+                        </Badge>
+                      </div>
+                      <p className="mt-1 text-sm text-gray-600">{p.topic || p.description}</p>
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                        {p.participants?.map((m) => (
+                          <span key={`${p.id}-${m.agent_id}`} className="rounded-full bg-gray-100 px-2 py-0.5">
+                            {m.name} · {m.role}
+                          </span>
+                        ))}
+                      </div>
+                      {lastEvents.length > 0 && (
+                        <div className="mt-3 rounded bg-gray-50 p-3 text-xs text-gray-700 space-y-1">
+                          {lastEvents.map((evt, idx) => (
+                            <div key={`${p.id}-evt-${idx}`}>
+                              <span className="text-gray-400 mr-1">
+                                {new Date(evt.ts).toLocaleTimeString()}
+                              </span>
+                              {evt.agent_name ? <span className="font-medium mr-1">{evt.agent_name}:</span> : null}
+                              <span className="line-clamp-2">{evt.content}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Main Content */}
         <div className="space-y-6">
