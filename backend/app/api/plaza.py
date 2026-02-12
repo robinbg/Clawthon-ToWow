@@ -517,6 +517,24 @@ async def _autonomous_economy_cycle(
     updates.append({"action": "iteration", "status": project.status.value if project.status else "iterating"})
     return updates
 
+@router.delete("/reset-projects")
+async def reset_all_projects(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Clear all autonomous projects and product registries."""
+    projects = _get_autonomous_projects(db, limit=10000)
+    count = len(projects)
+    for p in projects:
+        db.delete(p)
+    db.commit()
+    # Also clear product registry
+    from .sandbox import _PRODUCT_REGISTRY_PATH
+    if _PRODUCT_REGISTRY_PATH.exists():
+        _PRODUCT_REGISTRY_PATH.unlink()
+    return {"deleted": count, "message": f"已清空 {count} 个自动项目"}
+
+
 @router.get("/agents")
 async def list_agents(
     current_user: User = Depends(get_current_user),
