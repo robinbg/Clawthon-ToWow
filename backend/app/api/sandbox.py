@@ -7,7 +7,9 @@ Product Sandbox — Agent 真实开发的产品在这里运行
 """
 import json
 import logging
+import os
 import traceback
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -20,6 +22,35 @@ from .ai import call_secondme_chat
 
 router = APIRouter(prefix="/sandbox", tags=["Product Sandbox"])
 logger = logging.getLogger(__name__)
+
+# ---- Product Registry (survives Vercel cold starts) ----
+_PRODUCT_REGISTRY_PATH = Path("/tmp/products_registry.json") if os.environ.get("VERCEL") else Path("products_registry.json")
+
+
+def _save_product_to_registry(project_id: int, name: str, code: str, product_type: str, description: str = "") -> None:
+    try:
+        registry: dict = {}
+        if _PRODUCT_REGISTRY_PATH.exists():
+            registry = json.loads(_PRODUCT_REGISTRY_PATH.read_text())
+        registry[str(project_id)] = {
+            "name": name,
+            "code": code,
+            "product_type": product_type,
+            "description": description,
+        }
+        _PRODUCT_REGISTRY_PATH.write_text(json.dumps(registry, ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f"Failed to save product registry: {e}")
+
+
+def _load_product_from_registry(project_id: int) -> Optional[dict]:
+    try:
+        if not _PRODUCT_REGISTRY_PATH.exists():
+            return None
+        registry = json.loads(_PRODUCT_REGISTRY_PATH.read_text())
+        return registry.get(str(project_id))
+    except Exception:
+        return None
 
 
 # ==================== 1. 开发：Agent 生成真实代码 ====================
@@ -95,12 +126,17 @@ async def develop_product_code(
     code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
     code = _clean_code(code, product_type)
 
-    # Save to project
+    # Save to project DB
     project.product_code = code
     project.product_type_detail = product_type
     project.product_endpoint = f"/sandbox/product/{project.id}"
     db.commit()
     db.refresh(project)
+
+    # Also persist to registry file (survives Vercel cold starts)
+    _save_product_to_registry(
+        project.id, project.name or "", code, product_type, project.description or ""
+    )
 
     return {
         "product_type_detail": product_type,
@@ -140,24 +176,35 @@ async def preview_web_product(
     db: Session = Depends(get_db),
 ):
     """Serve the agent-built web product as a live HTML page."""
+    # Try DB first
     project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(404, "项目不存在")
-    if not project.product_code:
+    code = project.product_code if project else None
+    product_type = project.product_type_detail if project else None
+    name = project.name if project else f"Project #{project_id}"
+
+    # Fallback to registry if DB miss (Vercel cold start)
+    if not code:
+        reg = _load_product_from_registry(project_id)
+        if reg:
+            code = reg.get("code")
+            product_type = reg.get("product_type")
+            name = reg.get("name", name)
+
+    if not code:
         return HTMLResponse(
             "<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
-            "<h2>🚧 产品尚未开发</h2>"
-            f"<p>项目「{project.name}」还没有生成代码</p>"
+            f"<h2>🚧 产品尚未开发</h2>"
+            f"<p>项目「{name}」还没有生成代码</p>"
             "</body></html>"
         )
-    if project.product_type_detail != "web_app":
+    if product_type and product_type != "web_app":
         return HTMLResponse(
             "<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
-            f"<h2>该产品类型为 {project.product_type_detail}，不支持网页预览</h2>"
+            f"<h2>该产品类型为 {product_type}，不支持网页预览</h2>"
             f"<p>请使用 API 调用：POST /sandbox/product/{project_id}/call</p>"
             "</body></html>"
         )
-    return HTMLResponse(project.product_code)
+    return HTMLResponse(code)
 
 
 # ==================== 3. 调用 Agent Skill / MCP 服务 ====================
@@ -170,100 +217,71 @@ async def call_product(
 ):
     """Call an agent-built skill or MCP service."""
     project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(404, "项目不存在")
-    if not project.product_code:
-        raise HTTPException(400, "产品尚未开发")
+    code = project.product_code if project else None
+    product_type = project.product_type_detail if project else None
 
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    # Fallback to registry
+    if not code:
+        reg = _load_product_from_registry(project_id)
+        if reg:
+            code = reg.get("code")
+            product_type = reg.get("product_type")
 
-    if project.product_type_detail == "agent_skill":
-        return _execute_skill_sandbox(project, body)
-    elif project.product_type_detail == "mcp_service":
+    if not code:
+        raise HTTPException(404, "产品不存在或尚未开发")
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    if product_type == "agent_skill":
+        return _execute_skill_sandbox_code(project_id, code, body)
+    elif product_type == "mcp_service":
         method = body.get("method", "")
         params = body.get("params", {})
-        return _execute_mcp_sandbox(project, method, params)
+        return _execute_mcp_sandbox_code(project_id, code, method, params)
     else:
-        raise HTTPException(400, f"产品类型 {project.product_type_detail} 不支持 API 调用，请使用 /preview")
+        raise HTTPException(400, f"产品类型 {product_type} 不支持 API 调用，请使用 /preview")
 
 
-def _execute_skill_sandbox(project: Project, input_data: dict) -> JSONResponse:
-    """Execute agent skill code in a restricted sandbox."""
+_SAFE_BUILTINS: dict[str, Any] = {
+    "str": str, "int": int, "float": float, "bool": bool,
+    "list": list, "dict": dict, "tuple": tuple, "set": set,
+    "len": len, "range": range, "enumerate": enumerate,
+    "zip": zip, "map": map, "filter": filter,
+    "sorted": sorted, "reversed": reversed,
+    "min": min, "max": max, "sum": sum, "abs": abs, "round": round,
+    "isinstance": isinstance, "type": type,
+    "True": True, "False": False, "None": None,
+    "print": lambda *a, **k: None,
+    "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError, "KeyError": KeyError,
+}
+
+
+def _execute_skill_sandbox_code(project_id: int, code: str, input_data: dict) -> JSONResponse:
     try:
-        # Create a restricted namespace
-        namespace: dict[str, Any] = {"__builtins__": {
-            "str": str, "int": int, "float": float, "bool": bool,
-            "list": list, "dict": dict, "tuple": tuple, "set": set,
-            "len": len, "range": range, "enumerate": enumerate,
-            "zip": zip, "map": map, "filter": filter,
-            "sorted": sorted, "reversed": reversed,
-            "min": min, "max": max, "sum": sum, "abs": abs, "round": round,
-            "isinstance": isinstance, "type": type,
-            "True": True, "False": False, "None": None,
-            "print": lambda *a, **k: None,  # no-op print
-            "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError,
-            "KeyError": KeyError,
-        }}
-        exec(project.product_code, namespace)
-
+        namespace: dict[str, Any] = {"__builtins__": _SAFE_BUILTINS.copy()}
+        exec(code, namespace)
         if "execute_skill" not in namespace:
             return JSONResponse({"error": "Skill 代码中未找到 execute_skill 函数"}, status_code=500)
-
         result = namespace["execute_skill"](input_data)
-
-        # Record usage
-        project.usage_count = (project.usage_count or 0) + 1
-        from ..models.database import SessionLocal
-        # commit is handled by caller
-
-        return JSONResponse({
-            "success": True,
-            "project_id": project.id,
-            "project_name": project.name,
-            "result": result,
-        })
+        return JSONResponse({"success": True, "project_id": project_id, "result": result})
     except Exception as e:
-        return JSONResponse({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()[-500:],
-        }, status_code=500)
+        return JSONResponse({"success": False, "error": str(e), "traceback": traceback.format_exc()[-500:]}, status_code=500)
 
 
-def _execute_mcp_sandbox(project: Project, method: str, params: dict) -> JSONResponse:
-    """Execute MCP service code in a restricted sandbox."""
+def _execute_mcp_sandbox_code(project_id: int, code: str, method: str, params: dict) -> JSONResponse:
     try:
-        namespace: dict[str, Any] = {"__builtins__": {
-            "str": str, "int": int, "float": float, "bool": bool,
-            "list": list, "dict": dict, "tuple": tuple, "set": set,
-            "len": len, "range": range, "enumerate": enumerate,
-            "zip": zip, "map": map, "filter": filter,
-            "sorted": sorted, "reversed": reversed,
-            "min": min, "max": max, "sum": sum, "abs": abs, "round": round,
-            "isinstance": isinstance, "type": type,
-            "True": True, "False": False, "None": None,
-            "print": lambda *a, **k: None,
-            "Exception": Exception, "ValueError": ValueError,
-        }}
-        exec(project.product_code, namespace)
-
+        namespace: dict[str, Any] = {"__builtins__": _SAFE_BUILTINS.copy()}
+        exec(code, namespace)
         if "handle_request" not in namespace:
             return JSONResponse({"error": "MCP 代码中未找到 handle_request 函数"}, status_code=500)
-
         result = namespace["handle_request"](method, params)
-
-        project.usage_count = (project.usage_count or 0) + 1
-
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "result": result,
-            "project_id": project.id,
-        })
+        return JSONResponse({"jsonrpc": "2.0", "result": result, "project_id": project_id})
     except Exception as e:
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "error": {"code": -32000, "message": str(e)},
-        }, status_code=500)
+        return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32000, "message": str(e)}}, status_code=500)
 
 
 # ==================== 4. 列出所有可用产品 ====================
@@ -273,23 +291,43 @@ async def list_products(
     db: Session = Depends(get_db),
     product_type: Optional[str] = Query(default=None),
 ):
-    """List all projects that have deployed products."""
+    """List all projects that have deployed products (DB + registry fallback)."""
+    result = []
+    seen_ids: set[int] = set()
+
+    # From DB
     query = db.query(Project).filter(Project.product_code.isnot(None))
     if product_type:
         query = query.filter(Project.product_type_detail == product_type)
-    projects = query.order_by(Project.usage_count.desc()).all()
-
-    return [
-        {
-            "id": p.id,
-            "name": p.name,
-            "description": p.description,
+    for p in query.order_by(Project.usage_count.desc()).all():
+        seen_ids.add(p.id)
+        result.append({
+            "id": p.id, "name": p.name, "description": p.description,
             "product_type": p.product_type_detail,
-            "endpoint": p.product_endpoint,
             "preview_url": f"/sandbox/product/{p.id}/preview" if p.product_type_detail == "web_app" else None,
             "call_url": f"/sandbox/product/{p.id}/call" if p.product_type_detail in ("agent_skill", "mcp_service") else None,
             "usage_count": p.usage_count or 0,
-            "price_per_use": p.price_per_use or 0,
-        }
-        for p in projects
-    ]
+        })
+
+    # From registry (fill in any missing)
+    try:
+        if _PRODUCT_REGISTRY_PATH.exists():
+            registry = json.loads(_PRODUCT_REGISTRY_PATH.read_text())
+            for pid_str, info in registry.items():
+                pid = int(pid_str)
+                if pid in seen_ids:
+                    continue
+                pt = info.get("product_type", "")
+                if product_type and pt != product_type:
+                    continue
+                result.append({
+                    "id": pid, "name": info.get("name", ""), "description": info.get("description", ""),
+                    "product_type": pt,
+                    "preview_url": f"/sandbox/product/{pid}/preview" if pt == "web_app" else None,
+                    "call_url": f"/sandbox/product/{pid}/call" if pt in ("agent_skill", "mcp_service") else None,
+                    "usage_count": 0,
+                })
+    except Exception:
+        pass
+
+    return result
