@@ -636,12 +636,21 @@ async def autonomous_feed(
                 await asyncio.sleep(5)
                 continue
 
-            # generate 1 topic per iteration (pass existing projects for dedup)
+            # generate 1 topic per iteration (pass existing projects for dedup, with retries)
             all_existing = _get_autonomous_projects(db, limit=500)
-            try:
-                topics = await _generate_project_topics(current_user.access_token, 1, existing_projects=all_existing)
-            except Exception as exc:
-                yield _to_sse({"type": "error", "content": f"生成主题失败: {str(exc)[:100]}"})
+            topics = None
+            for attempt in range(3):
+                try:
+                    topics = await _generate_project_topics(current_user.access_token, 1, existing_projects=all_existing)
+                    if topics:
+                        break
+                except Exception as exc:
+                    if attempt < 2:
+                        yield _to_sse({"type": "system", "content": f"生成主题第{attempt+1}次失败，重试中..."})
+                        await asyncio.sleep(2)
+                    else:
+                        yield _to_sse({"type": "error", "content": f"生成主题连续3次失败: {str(exc)[:100]}，跳过本轮"})
+            if not topics:
                 await asyncio.sleep(3)
                 continue
 
