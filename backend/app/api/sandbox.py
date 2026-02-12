@@ -67,13 +67,25 @@ async def develop_product_code(
     # All products are web_app — the platform can only serve web applications
     product_type = "web_app"
 
-    # Generate product using TEMPLATE approach — SecondMe only fills logic, template guarantees structure
     desc = (project.description or project.name or "工具")[:300]
     short_name = (project.name or "Product").replace("[Auto] ", "")[:40]
 
-    if product_type == "web_app":
-        # Ask SecondMe for just the JS logic + content, not the full HTML
-        logic_prompt = f"""项目「{short_name}」需要一个 Web 工具。描述：{desc}
+    # Step 1: Let Agent assess feasibility — can this be fully implemented in pure client-side JS?
+    assess_prompt = f"""判断项目「{short_name}」能否用纯前端 JavaScript（无后端、无数据库、无 API 调用）完全实现核心功能。
+描述：{desc}
+
+只返回 JSON：
+{{"feasible": true或false, "reason": "一句话理由", "mock_features": ["如果不能完全实现，列出需要mock的功能"]}}"""
+
+    from .ai import parse_json_from_text
+    assess_raw = await call_secondme_chat(token, assess_prompt, enable_web_search=False)
+    assess = parse_json_from_text(assess_raw)
+    is_feasible = assess.get("feasible", False)
+    mock_features = assess.get("mock_features", [])
+
+    if product_type == "web_app" and is_feasible:
+        # FULL implementation — ask for real JS logic
+        logic_prompt = f"""项目「{short_name}」可以用纯前端实现。描述：{desc}
 
 请返回 JSON（不要其他内容）：
 {{
@@ -83,22 +95,66 @@ async def develop_product_code(
   "input_placeholder": "输入框 placeholder",
   "button_text": "按钮文字（如：分析、生成、计算）",
   "features": ["功能1名称", "功能2名称", "功能3名称"],
-  "js_process_function": "一段 JavaScript 代码，是 processInput(text) 函数体，接收用户输入 text，返回 HTML 格式的结果字符串。必须有真实逻辑（分析/计算/转换），不少于10行。"
+  "js_process_function": "processInput(text)函数体，接收用户输入text，返回HTML结果字符串。必须有真实逻辑（字符串处理/计算/转换/分析），不少于15行JS代码。不能用fetch/XMLHttpRequest。"
 }}"""
         logic_raw = await call_secondme_chat(token, logic_prompt, enable_web_search=False)
-        from .ai import parse_json_from_text
         logic = parse_json_from_text(logic_raw)
 
-        title = logic.get("title", short_name)
-        subtitle = logic.get("subtitle", desc[:50])
-        input_label = logic.get("input_label", "请输入内容")
-        placeholder = logic.get("input_placeholder", "在此输入...")
-        btn_text = logic.get("button_text", "处理")
-        features = logic.get("features", ["功能1", "功能2", "功能3"])
+    elif product_type == "web_app":
+        # MOCK mode — PRD + demo UI with simulated data
+        logic_prompt = f"""项目「{short_name}」超出纯前端能力（需要后端/数据库/AI API），做一个 PRD + Mock 演示界面。
+描述：{desc}
+无法实现的功能：{', '.join(mock_features) if mock_features else '需要服务端'}
+
+请返回 JSON（不要其他内容）：
+{{
+  "title": "产品名称（10字以内）",
+  "subtitle": "一句话描述（20字以内）",
+  "input_label": "输入框提示",
+  "input_placeholder": "placeholder",
+  "button_text": "按钮文字",
+  "features": ["功能1", "功能2", "功能3"],
+  "prd_summary": "3-5句话的PRD摘要，描述产品定位、目标用户、核心功能",
+  "mock_responses": ["点击按钮后显示的模拟结果1", "模拟结果2", "模拟结果3"]
+}}"""
+        logic_raw = await call_secondme_chat(token, logic_prompt, enable_web_search=False)
+        logic = parse_json_from_text(logic_raw)
+
+    # Extract common fields
+    title = logic.get("title", short_name)
+    subtitle = logic.get("subtitle", desc[:50])
+    input_label = logic.get("input_label", "请输入内容")
+    placeholder = logic.get("input_placeholder", "在此输入...")
+    btn_text = logic.get("button_text", "处理")
+    features = logic.get("features", ["功能1", "功能2", "功能3"])
+    features_html = "".join(f'<span style="background:#eff6ff;color:#2563eb;padding:4px 12px;border-radius:20px;font-size:13px">{f}</span>' for f in features[:5])
+
+    if product_type == "web_app" and is_feasible:
+        # Full implementation JS
         js_body = logic.get("js_process_function", "return '<p>处理完成：' + text.length + ' 个字符</p>';")
+        mode_badge = ""
+        process_script = f"""function processInput(text) {{
+  try {{
+    {js_body}
+  }} catch(e) {{
+    return '<p style="color:red">处理出错：' + e.message + '</p>';
+  }}
+}}"""
+    else:
+        # Mock mode — show PRD + simulated results
+        prd_summary = logic.get("prd_summary", f"{title}：{subtitle}")
+        mock_responses = logic.get("mock_responses", ["这是模拟结果，实际产品需要后端支持。"])
+        mock_json = json.dumps(mock_responses, ensure_ascii=False)
+        mode_badge = '<div style="background:#fef3c7;color:#92400e;padding:8px 16px;border-radius:8px;font-size:13px;margin-top:12px;text-align:center">📋 PRD + Mock 演示 · 完整功能需要后端服务支持</div>'
+        process_script = f"""var _mockResponses = {mock_json};
+var _mockIdx = 0;
+function processInput(text) {{
+  var r = _mockResponses[_mockIdx % _mockResponses.length];
+  _mockIdx++;
+  return '<div style="margin-bottom:12px"><strong>📋 PRD 摘要</strong><p style="color:#64748b;margin:8px 0">{prd_summary}</p></div><hr style="border:none;border-top:1px solid #e2e8f0;margin:12px 0"><div><strong>🎯 模拟结果</strong><p style="margin:8px 0">' + r + '</p><p style="color:#94a3b8;font-size:12px;margin-top:8px">💡 这是 Mock 演示数据。输入内容：' + text.substring(0,50) + (text.length>50?'...':'') + ' (' + text.length + '字符)</p></div>';
+}}"""
 
-        features_html = "".join(f'<span style="background:#eff6ff;color:#2563eb;padding:4px 12px;border-radius:20px;font-size:13px">{f}</span>' for f in features[:5])
-
+    if product_type == "web_app":
         code = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -136,6 +192,7 @@ body{{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;min-heig
     <h1>{title}</h1>
     <p>{subtitle}</p>
     <div class="features">{features_html}</div>
+    {mode_badge}
   </div>
   <div class="card">
     <label>{input_label}</label>
@@ -149,13 +206,7 @@ body{{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;min-heig
   <div class="footer">Powered by Clawthon AI Agent · {short_name}</div>
 </div>
 <script>
-function processInput(text) {{
-  try {{
-    {js_body}
-  }} catch(e) {{
-    return '<p style="color:red">处理出错：' + e.message + '</p>';
-  }}
-}}
+{process_script}
 function run() {{
   var text = document.getElementById('input').value.trim();
   if(!text) {{ alert('请先输入内容'); return; }}
