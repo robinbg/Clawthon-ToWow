@@ -81,83 +81,127 @@ async def develop_product_code(
     except Exception:
         pass
 
-    # Generate actual code with VERY specific functional requirements
+    # Generate product using TEMPLATE approach — SecondMe only fills logic, template guarantees structure
     desc = (project.description or project.name or "工具")[:300]
+    short_name = (project.name or "Product").replace("[Auto] ", "")[:40]
 
     if product_type == "web_app":
-        code_prompt = f"""你是一个资深全栈开发工程师。请为「{project.name}」开发一个真正可用的单页 Web 应用。
+        # Ask SecondMe for just the JS logic + content, not the full HTML
+        logic_prompt = f"""项目「{short_name}」需要一个 Web 工具。描述：{desc}
 
-项目描述：{desc}
+请返回 JSON（不要其他内容）：
+{{
+  "title": "产品名称（10字以内）",
+  "subtitle": "一句话描述（20字以内）",
+  "input_label": "输入框的提示文字",
+  "input_placeholder": "输入框 placeholder",
+  "button_text": "按钮文字（如：分析、生成、计算）",
+  "features": ["功能1名称", "功能2名称", "功能3名称"],
+  "js_process_function": "一段 JavaScript 代码，是 processInput(text) 函数体，接收用户输入 text，返回 HTML 格式的结果字符串。必须有真实逻辑（分析/计算/转换），不少于10行。"
+}}"""
+        logic_raw = await call_secondme_chat(token, logic_prompt, enable_web_search=False)
+        from .ai import parse_json_from_text
+        logic = parse_json_from_text(logic_raw)
 
-## 严格要求（缺一不可）：
+        title = logic.get("title", short_name)
+        subtitle = logic.get("subtitle", desc[:50])
+        input_label = logic.get("input_label", "请输入内容")
+        placeholder = logic.get("input_placeholder", "在此输入...")
+        btn_text = logic.get("button_text", "处理")
+        features = logic.get("features", ["功能1", "功能2", "功能3"])
+        js_body = logic.get("js_process_function", "return '<p>处理完成：' + text.length + ' 个字符</p>';")
 
-1. 输出完整的 HTML 文件（CSS 和 JS 全部内联在 <style> 和 <script> 标签中）
-2. 以 <!DOCTYPE html> 开头，以 </html> 结尾
-3. 必须包含以下真实可用的功能区域：
-   - 顶部：产品名称 + 一句话描述
-   - 主体功能区：至少包含一个输入框/表单 + 一个操作按钮 + 一个结果展示区
-   - 按钮点击后必须执行真实的 JavaScript 逻辑（计算/转换/分析/生成），并把结果显示在页面上
-   - 如果是数据分析类：要有表格或图表展示
-   - 如果是工具类：要有输入→处理→输出的完整流程
-   - 如果是内容类：要有搜索/筛选/展示功能
-4. 样式要求：白色背景卡片，带阴影和圆角，字体用 system-ui，主色调蓝色(#2563eb)
-5. 底部显示 "Powered by Clawthon AI Agent · {project.name}"
-6. 响应式设计
+        features_html = "".join(f'<span style="background:#eff6ff;color:#2563eb;padding:4px 12px;border-radius:20px;font-size:13px">{f}</span>' for f in features[:5])
 
-## 禁止：
-- 不要只放一个渐变背景
-- 不要只有标题没有功能
-- 不要有任何"Coming Soon"或"TODO"
-- 不要引用任何外部CDN（全部自己写）
-
-只输出 HTML 代码，不要任何解释文字。"""
+        code = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;min-height:100vh;padding:20px}}
+.container{{max-width:700px;margin:0 auto}}
+.header{{text-align:center;padding:30px 0}}
+.header h1{{font-size:28px;color:#1e293b;margin-bottom:8px}}
+.header p{{color:#64748b;font-size:15px}}
+.features{{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:16px}}
+.card{{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08);padding:28px;margin-top:20px}}
+.card label{{display:block;font-weight:600;color:#334155;margin-bottom:10px;font-size:15px}}
+.card textarea{{width:100%;min-height:120px;border:2px solid #e2e8f0;border-radius:12px;padding:14px;font-size:15px;resize:vertical;outline:none;transition:border .2s}}
+.card textarea:focus{{border-color:#2563eb}}
+.btn{{display:block;width:100%;padding:14px;background:#2563eb;color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;margin-top:16px;transition:background .2s}}
+.btn:hover{{background:#1d4ed8}}
+.btn:active{{transform:scale(.98)}}
+.result{{margin-top:20px;padding:20px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;min-height:80px;font-size:14px;line-height:1.7;color:#334155}}
+.result:empty{{display:none}}
+.result h3{{color:#1e293b;margin-bottom:8px}}
+.result table{{width:100%;border-collapse:collapse;margin:10px 0}}
+.result th,.result td{{padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:13px}}
+.result th{{background:#f1f5f9;font-weight:600}}
+.footer{{text-align:center;padding:24px 0;color:#94a3b8;font-size:12px}}
+.loading{{text-align:center;color:#2563eb;padding:20px}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>{title}</h1>
+    <p>{subtitle}</p>
+    <div class="features">{features_html}</div>
+  </div>
+  <div class="card">
+    <label>{input_label}</label>
+    <textarea id="input" placeholder="{placeholder}"></textarea>
+    <button class="btn" onclick="run()">{btn_text}</button>
+  </div>
+  <div class="card" id="resultCard" style="display:none">
+    <label>处理结果</label>
+    <div class="result" id="result"></div>
+  </div>
+  <div class="footer">Powered by Clawthon AI Agent · {short_name}</div>
+</div>
+<script>
+function processInput(text) {{
+  try {{
+    {js_body}
+  }} catch(e) {{
+    return '<p style="color:red">处理出错：' + e.message + '</p>';
+  }}
+}}
+function run() {{
+  var text = document.getElementById('input').value.trim();
+  if(!text) {{ alert('请先输入内容'); return; }}
+  var resultDiv = document.getElementById('result');
+  var card = document.getElementById('resultCard');
+  card.style.display = 'block';
+  resultDiv.innerHTML = '<div class="loading">⏳ 正在处理...</div>';
+  setTimeout(function() {{
+    resultDiv.innerHTML = processInput(text);
+  }}, 300);
+}}
+</script>
+</body>
+</html>"""
 
     elif product_type == "agent_skill":
-        code_prompt = f"""你是一个 Agent 技能开发工程师。请为「{project.name}」开发一个真正可执行的 Agent Skill。
+        code_prompt = f"""为项目「{short_name}」写一个 Python 函数。描述：{desc}
 
-项目描述：{desc}
-
-## 严格要求：
-
-```python
-def execute_skill(input_data: dict) -> dict:
-    \"\"\"
-    输入: input_data 字典，包含具体参数
-    输出: 包含处理结果的字典
-    \"\"\"
-    # 你的实现
-```
-
-1. 函数必须能真正处理输入并产出有意义的输出
-2. 必须包含至少 3 个具体的处理步骤（不是简单的 echo）
-3. 处理逻辑要与项目描述匹配（如文本分析就要真的做分析，数据处理就要真的处理数据）
-4. 只用 Python 标准库（不能 import 第三方包）
-5. 完善的错误处理（try/except）
-6. 在函数顶部注释清楚输入格式和输出格式
-
-只输出 Python 代码，不要解释。"""
+要求：函数名 execute_skill，签名 def execute_skill(input_data: dict) -> dict
+必须有真实处理逻辑（不是echo），只用标准库，包含错误处理。
+只输出 Python 代码。"""
+        code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
+        code = _clean_code(code, "agent_skill")
 
     else:  # mcp_service
-        code_prompt = f"""你是一个 MCP 服务开发工程师。请为「{project.name}」开发一个可调用的 MCP 兼容服务。
+        code_prompt = f"""为项目「{short_name}」写一个 MCP 服务 Python 函数。描述：{desc}
 
-项目描述：{desc}
-
-## 严格要求：
-
-```python
-def handle_request(method: str, params: dict) -> dict:
-    \"\"\"支持多个 method 的 MCP 服务\"\"\"
-    # 你的实现
-```
-
-1. 至少支持 3 个不同的 method（如 analyze, transform, query 等）
-2. 每个 method 有真实的处理逻辑
-3. 返回格式：{{"result": ..., "status": "ok"}}
-4. 错误返回：{{"error": "描述", "status": "error"}}
-5. 只用 Python 标准库
-6. 在函数顶部注释说明支持的 methods 及参数格式
-
-只输出 Python 代码，不要解释。"""
+要求：函数名 handle_request，签名 def handle_request(method: str, params: dict) -> dict
+支持至少3个method，真实逻辑，只用标准库。
+只输出 Python 代码。"""
+        code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
+        code = _clean_code(code, "mcp_service")
 
     code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
     code = _clean_code(code, product_type)
