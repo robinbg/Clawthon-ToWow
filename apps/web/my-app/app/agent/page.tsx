@@ -92,10 +92,28 @@ export default function AgentWorkspacePage() {
   const [error, setError] = useState('');
   const [thinking, setThinking] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
-  const [autoProjects, setAutoProjects] = useState<WorkbenchProject[]>([]);
+  const [autoProjects, setAutoProjects] = useState<WorkbenchProject[]>(() => {
+    // Initialize from localStorage cache to prevent flicker on page navigation
+    if (typeof window !== 'undefined') {
+      try {
+        const cached = localStorage.getItem('clawthon_workbench_projects');
+        if (cached) return JSON.parse(cached);
+      } catch { }
+    }
+    return [];
+  });
   const [autoProjectsLoading, setAutoProjectsLoading] = useState(true);
   const [expandedProjectIds, setExpandedProjectIds] = useState<number[]>([]);
   const router = useRouter();
+
+  // Persist to localStorage whenever autoProjects changes
+  useEffect(() => {
+    if (autoProjects.length > 0 && typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('clawthon_workbench_projects', JSON.stringify(autoProjects));
+      } catch { }
+    }
+  }, [autoProjects]);
 
   useEffect(() => {
     if (!api.getToken()) {
@@ -105,7 +123,7 @@ export default function AgentWorkspacePage() {
     void loadAutoProjects();
     const timer = window.setInterval(() => {
       void loadAutoProjects();
-    }, 15000); // 15s — avoid cold-start flicker
+    }, 15000);
     return () => window.clearInterval(timer);
   }, []);
 

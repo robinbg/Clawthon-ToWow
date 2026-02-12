@@ -24,15 +24,82 @@ const navItems = [
   { label: '项目', href: '/projects' },
 ];
 
+// ---- Global agent stream (singleton, survives across page navigations) ----
+let _globalStreamRunning = false;
+let _globalAbort: AbortController | null = null;
+
+function startGlobalAgentStream() {
+  if (_globalStreamRunning) return;
+  const token = typeof window !== 'undefined' ? localStorage.getItem('clawthon_token') : null;
+  if (!token) return;
+
+  _globalStreamRunning = true;
+  _globalAbort = new AbortController();
+  const controller = _globalAbort;
+
+  window.dispatchEvent(new CustomEvent('agent-status', { detail: { active: true } }));
+
+  const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
+
+  (async () => {
+    let retries = 0;
+    while (_globalStreamRunning) {
+      try {
+        const response = await fetch(`${apiUrl}/plaza/autonomous-feed`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        retries = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop() || '';
+          for (const part of parts) {
+            const line = part.split('\n').find(l => l.startsWith('data: '));
+            if (!line) continue;
+            try {
+              const evt = JSON.parse(line.slice(6));
+              // Broadcast to all pages
+              window.dispatchEvent(new CustomEvent('plaza-event', { detail: evt }));
+            } catch { /* skip bad JSON */ }
+          }
+        }
+      } catch {
+        if (!_globalStreamRunning) break;
+      }
+      retries++;
+      await new Promise(r => setTimeout(r, Math.min(10000, 2000 * retries)));
+    }
+  })();
+}
+
+function stopGlobalAgentStream() {
+  _globalStreamRunning = false;
+  if (_globalAbort) {
+    _globalAbort.abort();
+    _globalAbort = null;
+  }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('agent-status', { detail: { active: false } }));
+  }
+}
+
 export function Navbar() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [agentActive, setAgentActive] = useState(false);
+  const [agentActive, setAgentActive] = useState(_globalStreamRunning);
   const router = useRouter();
   const pathname = usePathname();
-  const bgAbortRef = useRef<AbortController | null>(null);
 
-  // 加载用户信息
   function checkAuth() {
     const token = api.getToken();
     if (token) {
@@ -40,76 +107,41 @@ export function Navbar() {
       api.getMe()
         .then((u) => {
           setUser(u);
-          // Start background agent activity when logged in
-          startBackgroundAgent();
+          startGlobalAgentStream();
+          setAgentActive(true);
         })
-        .catch(() => { api.clearToken(); setUser(null); stopBackgroundAgent(); })
+        .catch(() => { api.clearToken(); setUser(null); stopGlobalAgentStream(); setAgentActive(false); })
         .finally(() => setLoading(false));
     } else {
       setUser(null);
       setLoading(false);
-      stopBackgroundAgent();
+      stopGlobalAgentStream();
+      setAgentActive(false);
     }
-  }
-
-  function stopBackgroundAgent() {
-    if (bgAbortRef.current) {
-      bgAbortRef.current.abort();
-      bgAbortRef.current = null;
-    }
-    setAgentActive(false);
-  }
-
-  function startBackgroundAgent() {
-    // Don't start if already running or if we're on the plaza page (plaza manages its own stream)
-    if (bgAbortRef.current || pathname === '/plaza') return;
-    const token = api.getToken();
-    if (!token) return;
-
-    const controller = new AbortController();
-    bgAbortRef.current = controller;
-    setAgentActive(true);
-
-    const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
-    fetch(`${apiUrl}/plaza/autonomous-feed`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` },
-      signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok || !response.body) return;
-      const reader = response.body.getReader();
-      // Just consume the stream silently to keep agent active
-      while (true) {
-        const { done } = await reader.read();
-        if (done) break;
-      }
-    }).catch(() => {
-      // silently ignore — stream will reconnect on next auth check
-    }).finally(() => {
-      if (bgAbortRef.current === controller) {
-        bgAbortRef.current = null;
-        setAgentActive(false);
-      }
-    });
   }
 
   useEffect(() => {
     checkAuth();
 
-    // 监听 token 变化（Dashboard 存完 token 后会触发）
     const handleAuthChange = () => checkAuth();
+    const handleAgentStatus = (e: Event) => {
+      const ce = e as CustomEvent;
+      setAgentActive(ce.detail?.active ?? false);
+    };
     window.addEventListener('auth-change', handleAuthChange);
     window.addEventListener('storage', handleAuthChange);
+    window.addEventListener('agent-status', handleAgentStatus);
 
-    // 每次路由变化也检查一次
     return () => {
       window.removeEventListener('auth-change', handleAuthChange);
       window.removeEventListener('storage', handleAuthChange);
-      stopBackgroundAgent();
+      window.removeEventListener('agent-status', handleAgentStatus);
+      // DON'T stop global stream on unmount — it should persist
     };
-  }, [pathname]); // pathname 变化时重新检查
+  }, [pathname]);
 
   const handleLogout = () => {
+    stopGlobalAgentStream();
     api.clearToken();
     setUser(null);
     router.push('/');
@@ -119,9 +151,6 @@ export function Navbar() {
     const clientId = process.env.NEXT_PUBLIC_SECONDME_CLIENT_ID || '';
     const redirectUri = `${window.location.origin}/api/auth/callback`;
     const state = Math.random().toString(36).substring(2, 18);
-    // SecondMe OAuth: https://go.second.me/oauth/
-    // SecondMe 要求 redirect_uri 不编码（编码后返回 Application not found）
-    // scope: user.info(用户信息) + chat(对话能力)
     const authUrl = `https://go.second.me/oauth/?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&state=${state}&scope=user.info,chat`;
     window.location.href = authUrl;
   };
@@ -129,15 +158,11 @@ export function Navbar() {
   return (
     <nav className="border-b bg-white">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-        {/* Logo */}
         <Link href="/" className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-600 text-white font-bold">
-            C
-          </div>
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-600 text-white font-bold">C</div>
           <span className="text-xl font-semibold">Clawthon</span>
         </Link>
 
-        {/* Navigation */}
         <div className="hidden md:flex items-center gap-6">
           {navItems.map((item) => (
             <Link
@@ -152,7 +177,6 @@ export function Navbar() {
           ))}
         </div>
 
-        {/* User Menu */}
         <div className="flex items-center gap-4">
           {loading ? (
             <div className="h-8 w-8 animate-pulse rounded-full bg-gray-200" />
@@ -189,19 +213,11 @@ export function Navbar() {
                     </div>
                   </div>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => router.push('/dashboard')}>
-                    Dashboard
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => router.push('/projects')}>
-                    我的项目
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => router.push('/settings')}>
-                    设置
-                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => router.push('/dashboard')}>Dashboard</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => router.push('/projects')}>我的项目</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => router.push('/settings')}>设置</DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={handleLogout} className="text-red-600">
-                    退出登录
-                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleLogout} className="text-red-600">退出登录</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </>

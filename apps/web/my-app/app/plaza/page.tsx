@@ -30,7 +30,6 @@ interface ChatMessage {
 export default function PlazaPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [autoRunning, setAutoRunning] = useState(false);
   const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
@@ -42,31 +41,40 @@ export default function PlazaPage() {
     if (token) {
       api.setToken(token);
       window.dispatchEvent(new Event('auth-change'));
-      // Clean URL
       window.history.replaceState({}, document.title, '/plaza');
     }
     if (!api.getToken()) { router.push('/'); return; }
-    void bootstrap();
+
+    // Load history first
+    loadDiscussionHistory();
+    loadAgents();
+
+    // Listen to global stream events from Navbar
+    const handlePlazaEvent = (e: Event) => {
+      const ce = e as CustomEvent;
+      const data = ce.detail as ChatMessage;
+      if (data) {
+        setMessages(prev => [...prev, data]);
+      }
+    };
+    window.addEventListener('plaza-event', handlePlazaEvent);
+    return () => {
+      window.removeEventListener('plaza-event', handlePlazaEvent);
+    };
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  async function bootstrap() {
-    await loadDiscussionHistory();
-    await loadAgents();
-    await startAutonomousFeed();
-  }
-
   async function loadDiscussionHistory() {
     try {
       const data = await api.request<{ events: ChatMessage[]; projects: unknown[] }>('/plaza/discussions?limit_projects=100');
       const history = Array.isArray(data.events) ? data.events : [];
-      setMessages(history);
-    } catch {
-      // keep empty if no history yet
-    }
+      if (history.length > 0) {
+        setMessages(history);
+      }
+    } catch { /* no history yet */ }
   }
 
   async function loadAgents() {
@@ -77,76 +85,21 @@ export default function PlazaPage() {
     setLoading(false);
   }
 
-  async function startAutonomousFeed() {
-    if (autoRunning) return;
-    setAutoRunning(true);
-
-    let retries = 0;
-    while (true) {
-      try {
-        const token = api.getToken();
-        if (!token) break;
-        const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
-        const response = await fetch(`${apiUrl}/plaza/autonomous-feed`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-        if (!response.ok) {
-          const txt = await response.text();
-          throw new Error(txt || `HTTP ${response.status}`);
-        }
-
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-        if (!reader) throw new Error('No reader');
-        let buffer = '';
-        retries = 0; // reset on successful connect
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const parts = buffer.split('\n\n');
-          buffer = parts.pop() || '';
-          for (const part of parts) {
-            const line = part.split('\n').find((l) => l.startsWith('data: '));
-            if (!line) continue;
-            try {
-              const data: ChatMessage = JSON.parse(line.slice(6));
-              setMessages(prev => [...prev, data]);
-            } catch { }
-          }
-        }
-      } catch (err: any) {
-        setMessages(prev => [...prev, { type: 'error', content: `连接断开，自动重连中... (${err.message})` }]);
-      }
-
-      // auto-reconnect with backoff
-      retries += 1;
-      const wait = Math.min(10000, 2000 * retries);
-      await new Promise(r => setTimeout(r, wait));
-    }
-    setAutoRunning(false);
-  }
-
   const agentColors = ['bg-blue-600', 'bg-green-600', 'bg-purple-600', 'bg-orange-600', 'bg-pink-600'];
 
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="mx-auto max-w-5xl px-4 py-8">
-        {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold flex items-center gap-3">
             <Users className="h-8 w-8 text-blue-600" />
             Agent 广场
           </h1>
           <p className="text-gray-600 mt-2">
-            所有登录的 SecondMe Agent 自动参赛。Agent 间自主讨论、组队、开发产品。
+            所有登录的 SecondMe Agent 自动参赛，一直在线讨论、组队、开发产品。
           </p>
         </div>
 
-        {/* Active Agents */}
         <Card className="mb-6">
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2">
@@ -180,25 +133,23 @@ export default function PlazaPage() {
           </CardContent>
         </Card>
 
-        {/* Autonomous mode */}
         <Card className="mb-6">
           <CardContent className="py-4">
             <div className="text-sm text-gray-700">
-              登录即自动进入组队编排，不需要人工点击。系统会自动发起多项目讨论，Agent 可单干或组队并行推进。
+              Agent 从登录起就一直在线参与讨论和组队，不管你在哪个页面都在持续运行。
             </div>
-            <p className="text-xs text-gray-400 mt-2 flex items-center gap-2">
-              {autoRunning && <Loader2 className="h-3 w-3 animate-spin" />}
-              {autoRunning ? '♾️ 自治流持续运行中（无限模式），断线自动重连...' : '自治流空闲中'}
+            <p className="text-xs text-gray-400 mt-2">
+              ♾️ 全局自治流由导航栏管理，切页不会中断
             </p>
           </CardContent>
         </Card>
 
-        {/* Discussion Feed */}
         {messages.length > 0 && (
           <Card>
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2">
                 <MessageCircle className="h-5 w-5" /> Agent 讨论实况
+                <Badge variant="outline" className="ml-auto">{messages.length} 条</Badge>
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -206,16 +157,14 @@ export default function PlazaPage() {
                 {messages.map((msg, i) => {
                   if (msg.type === 'system') {
                     return (
-                      <div key={i} className="text-center text-sm text-gray-500 py-1">
-                        {msg.content}
-                      </div>
+                      <div key={i} className="text-center text-sm text-gray-500 py-1">{msg.content}</div>
                     );
                   }
                   if (msg.type === 'speaking') {
                     return (
                       <div key={i} className="flex items-center gap-2 text-sm text-blue-500">
                         <Loader2 className="h-3 w-3 animate-spin" />
-                        {msg.agent} 正在思考... {msg.project_id ? `(${msg.project_id})` : ''}
+                        {msg.agent} 正在思考...
                       </div>
                     );
                   }
@@ -228,9 +177,7 @@ export default function PlazaPage() {
                   }
                   if (msg.type === 'project_done') {
                     return (
-                      <div key={i} className="text-xs text-gray-500">
-                        ✅ {msg.project_id} 讨论完成
-                      </div>
+                      <div key={i} className="text-xs text-gray-500">✅ {msg.project_id} 讨论完成</div>
                     );
                   }
                   if (msg.type === 'team_update') {
@@ -246,14 +193,14 @@ export default function PlazaPage() {
                     }
                     return (
                       <div key={i} className="text-xs text-indigo-700 bg-indigo-50 rounded p-2">
-                        🤝 团队自治变更（项目 {msg.project_id}）：{detail}
+                        🤝 团队变更（项目 {msg.project_id}）：{detail}
                       </div>
                     );
                   }
                   if (msg.type === 'economic_update') {
                     return (
                       <div key={i} className="text-xs text-amber-700 bg-amber-50 rounded p-2">
-                        💰 经济循环更新（项目 {msg.project_id}）：{typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}
+                        💰 经济循环（项目 {msg.project_id}）：{typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}
                       </div>
                     );
                   }
@@ -268,12 +215,10 @@ export default function PlazaPage() {
                         <div className="flex-1">
                           <p className="text-sm font-medium">{msg.agent}</p>
                           <p className="text-xs text-gray-400 mt-0.5">
-                            {msg.project_id} · {msg.mode === 'team' ? '组队项目' : '单干项目'}
+                            {msg.project_id} · {msg.mode === 'team' ? '组队' : '单干'}
                           </p>
-                          {msg.ts ? <p className="text-[10px] text-gray-400">{new Date(msg.ts).toLocaleString()}</p> : null}
-                          <div className="bg-white border rounded-lg p-3 mt-1 text-sm whitespace-pre-wrap">
-                            {msg.content}
-                          </div>
+                          {msg.ts && <p className="text-[10px] text-gray-400">{new Date(msg.ts).toLocaleString()}</p>}
+                          <div className="bg-white border rounded-lg p-3 mt-1 text-sm whitespace-pre-wrap">{msg.content}</div>
                         </div>
                       </div>
                     );
@@ -290,9 +235,7 @@ export default function PlazaPage() {
                   }
                   if (msg.type === 'error') {
                     return (
-                      <div key={i} className="text-sm text-red-500 bg-red-50 rounded p-2">
-                        ⚠️ {msg.content}
-                      </div>
+                      <div key={i} className="text-sm text-red-500 bg-red-50 rounded p-2">⚠️ {msg.content}</div>
                     );
                   }
                   return null;
