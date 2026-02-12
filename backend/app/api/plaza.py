@@ -156,15 +156,32 @@ def _flatten_discussions(projects_payload: list[dict[str, Any]]) -> list[dict[st
     for p in projects_payload:
         for idx, evt in enumerate(p.get("progress", [])):
             event_type = evt.get("event_type", "")
-            if event_type not in ("project_start", "message", "summary"):
+            if event_type not in (
+                "project_start",
+                "message",
+                "summary",
+                "team_member_joined",
+                "team_member_left",
+                "team_member_recruited",
+                "stage_advanced",
+            ):
                 continue
+            mapped_type = "message"
+            if event_type == "project_start":
+                mapped_type = "project_start"
+            elif event_type == "summary":
+                mapped_type = "summary"
+            elif event_type in ("team_member_joined", "team_member_left", "team_member_recruited"):
+                mapped_type = "team_update"
+            elif event_type == "stage_advanced":
+                mapped_type = "system"
             events.append(
                 {
                     "event_id": f"{p['id']}:{idx}:{evt.get('ts', '')}",
                     "project_id": p["id"],
                     "topic": p.get("topic"),
                     "mode": p.get("mode"),
-                    "type": "project_start" if event_type == "project_start" else ("summary" if event_type == "summary" else "message"),
+                    "type": mapped_type,
                     "agent_id": evt.get("agent_id"),
                     "agent": evt.get("agent_name"),
                     "content": evt.get("content"),
@@ -196,6 +213,45 @@ async def _autonomous_team_governance(
     if not decider:
         return []
 
+    stage = project.status.value if project.status else "exploring"
+    stage_policy = {
+        "exploring": {
+            "goal": "快速扩展信息面，优先补齐调研/产品洞察角色",
+            "allowed_actions": ["add", "update", "none"],
+            "team_size_hint": "2-4",
+            "allow_stage_transition_to": "team_forming",
+        },
+        "team_forming": {
+            "goal": "尽快形成可执行小队，角色覆盖产品/开发/增长",
+            "allowed_actions": ["add", "update", "remove", "none"],
+            "team_size_hint": "2-5",
+            "allow_stage_transition_to": "developing",
+        },
+        "developing": {
+            "goal": "稳定执行，避免频繁换人，仅按缺口补位",
+            "allowed_actions": ["add", "update", "remove", "none"],
+            "team_size_hint": "2-6",
+            "allow_stage_transition_to": "launched",
+        },
+        "launched": {
+            "goal": "上线后保稳定，围绕运营与增长做小幅调整",
+            "allowed_actions": ["add", "update", "none"],
+            "team_size_hint": "2-6",
+            "allow_stage_transition_to": "iterating",
+        },
+        "iterating": {
+            "goal": "迭代优化，按反馈微调团队，不做大规模重组",
+            "allowed_actions": ["add", "update", "remove", "none"],
+            "team_size_hint": "2-6",
+            "allow_stage_transition_to": "iterating",
+        },
+    }.get(stage, {
+        "goal": "保持团队稳定并按需优化",
+        "allowed_actions": ["add", "update", "remove", "none"],
+        "team_size_hint": "2-5",
+        "allow_stage_transition_to": stage,
+    })
+
     member_ids = [m.get("agent_id") for m in members if isinstance(m, dict)]
     candidates = [
         {"id": a.id, "name": _pick_agent_name(a), "budget": a.budget}
@@ -205,13 +261,21 @@ async def _autonomous_team_governance(
 
     prompt = (
         f"你是项目治理 Agent。请为项目「{project.name}」做团队调整决策。\n"
+        f"当前阶段：{stage}\n"
+        f"阶段目标：{stage_policy['goal']}\n"
+        f"建议团队规模：{stage_policy['team_size_hint']}\n"
+        f"允许动作：{stage_policy['allowed_actions']}\n"
+        f"可推进到阶段：{stage_policy['allow_stage_transition_to']}\n"
+        f"项目描述：{project.description or ''}\n"
+        f"当前状态：valuation={project.valuation}, funding_pool={project.funding_pool}, revenue={project.total_revenue}, usage_count={project.usage_count}\n"
         f"当前成员：{json.dumps(members, ensure_ascii=False)}\n"
         f"可招募候选：{json.dumps(candidates, ensure_ascii=False)}\n"
         "请仅返回 JSON："
-        '{"actions":[{"action":"add|remove|update|none","agent_id":0,"role":"member","equity":10,"reason":""}]}\n'
+        '{"actions":[{"action":"add|remove|update|advance_stage|none","agent_id":0,"role":"member","equity":10,"to_stage":"team_forming|developing|launched|iterating","reason":""}]}\n'
         "约束：\n"
-        "1) 最多返回 2 个动作\n"
+        "1) 最多返回 3 个动作\n"
         "2) 不能移除 owner\n"
+        "3) stage 只能推进到可推进阶段，不可回退\n"
         "3) 如果无需调整，返回 action=none\n"
     )
     raw = await call_secondme_chat(
@@ -225,8 +289,11 @@ async def _autonomous_team_governance(
     if not isinstance(actions, list):
         return []
 
+    valid_stage_values = {s.value for s in ProjectStatus}
+    allowed_transition = str(stage_policy["allow_stage_transition_to"])
+
     applied: list[dict[str, Any]] = []
-    for action in actions[:2]:
+    for action in actions[:3]:
         if not isinstance(action, dict):
             continue
         kind = str(action.get("action", "none")).lower()
@@ -245,6 +312,20 @@ async def _autonomous_team_governance(
                     continue
                 ProjectService.remove_team_member(db, project.id, agent_id)
                 applied.append({"action": kind, "agent_id": agent_id, "reason": reason})
+            elif kind == "advance_stage":
+                to_stage = str(action.get("to_stage", "")).strip()
+                if to_stage in valid_stage_values and to_stage == allowed_transition:
+                    if project.status is None or project.status.value != to_stage:
+                        project.status = ProjectStatus(to_stage)
+                        db.commit()
+                        db.refresh(project)
+                        _append_progress(
+                            db,
+                            project,
+                            event_type="stage_advanced",
+                            content=f"项目阶段从 {stage} 推进到 {to_stage}",
+                        )
+                        applied.append({"action": kind, "to_stage": to_stage, "reason": reason})
         except Exception:
             continue
     return applied
@@ -422,7 +503,7 @@ async def autonomous_feed(
                     name=f"[Auto] {topic[:60]}",
                     description=topic[:500],
                     product_type=ProductType.AGENT_SERVICE,
-                    status=ProjectStatus.TEAM_FORMING,
+                    status=ProjectStatus.EXPLORING,
                     owner_id=lead.id,
                     team_members=_build_team_members(participants, mode),
                     valuation=1000.0,
@@ -523,7 +604,8 @@ async def autonomous_feed(
                     project_idea = parsed_summary.get("project_idea")
                     if isinstance(project_idea, str) and project_idea.strip():
                         db_project.description = project_idea.strip()[:1000]
-                db_project.status = ProjectStatus.DEVELOPING
+                if db_project.status == ProjectStatus.EXPLORING:
+                    db_project.status = ProjectStatus.TEAM_FORMING
                 _append_progress(
                     db,
                     db_project,
