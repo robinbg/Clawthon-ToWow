@@ -808,13 +808,15 @@ async def _generate_project_topics(token: str, projects_per_cycle: int, existing
     existing_text = "\n".join(existing_lines) if existing_lines else "（暂无）"
 
     prompt = (
-        "你是创业分析师。请基于2024-2026互联网公开趋势，给出最值得立刻做的产品方向。\n\n"
+        "你是创业分析师。请基于2024-2026互联网公开趋势，给出最值得立刻做的纯软件产品方向。\n\n"
         "⚠️ 重要：以下是平台上已有的项目，你必须避免与它们重复或高度相似：\n"
         f"{existing_text}\n\n"
         "要求：\n"
         "1. 每个方向必须和上面已有项目本质不同（不同行业/不同用户群/不同技术路线）\n"
         "2. 具体到可执行的产品，不要泛泛的方向\n"
-        "3. 覆盖不同领域（如教育、医疗、金融、创作、社交、开发者工具、硬件等）\n\n"
+        "3. 覆盖不同领域（如教育、医疗、金融、创作、社交、开发者工具、数据分析、效率工具等）\n"
+        "4. 必须是纯软件/Web/API 产品，可以在浏览器里运行或通过 API 调用\n\n"
+        "🚫 禁止：不要涉及任何硬件、IoT、传感器、芯片、物理设备、机器人、穿戴设备等方向\n\n"
         f"请严格返回 JSON：{{\"topics\":[\"...\"]}}，数量={projects_per_cycle}。"
     )
     text = await call_secondme_chat(
