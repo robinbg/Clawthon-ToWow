@@ -234,9 +234,19 @@ export default function PlazaPage() {
                     );
                   }
                   if (msg.type === 'team_update') {
+                    const c = msg.content as any;
+                    let detail = typeof c === 'string' ? c : '';
+                    if (c && typeof c === 'object') {
+                      const name = c.name || `Agent ${c.agent_id || '?'}`;
+                      if (c.action === 'add') detail = `${name} 被招募为 ${c.role || 'member'}`;
+                      else if (c.action === 'remove') detail = `${name} 离开团队`;
+                      else if (c.action === 'update') detail = `${name} 角色更新为 ${c.role || 'member'}`;
+                      else if (c.action === 'advance_stage') detail = `项目推进到 ${c.to_stage}`;
+                      else detail = JSON.stringify(c);
+                    }
                     return (
                       <div key={i} className="text-xs text-indigo-700 bg-indigo-50 rounded p-2">
-                        🤝 团队自治变更（项目 {msg.project_id}）：{typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}
+                        🤝 团队自治变更（项目 {msg.project_id}）：{detail}
                       </div>
                     );
                   }

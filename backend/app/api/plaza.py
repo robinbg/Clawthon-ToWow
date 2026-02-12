@@ -307,6 +307,10 @@ async def _autonomous_team_governance(
     valid_stage_values = {s.value for s in ProjectStatus}
     allowed_transition = str(stage_policy["allow_stage_transition_to"])
 
+    # Build set of all real agent IDs for validation
+    all_real_agent_ids = {a.id for a in token_agents}
+    candidate_ids = {c["id"] for c in candidates}
+
     applied: list[dict[str, Any]] = []
     for action in actions[:3]:
         if not isinstance(action, dict):
@@ -318,15 +322,37 @@ async def _autonomous_team_governance(
         role = str(action.get("role", "member"))
         equity = float(action.get("equity", 10) or 10)
         reason = str(action.get("reason", "")).strip()
+
+        # CRITICAL: skip any agent_id that doesn't exist in the real system
+        if kind in ("add", "update", "remove") and agent_id not in all_real_agent_ids:
+            logger.warning(f"Governance skipped: agent_id={agent_id} does not exist in system")
+            continue
+
         try:
-            if kind in ("add", "update"):
+            if kind == "add":
+                # Only allow adding agents that are in the candidate list (not already members)
+                if agent_id not in candidate_ids:
+                    continue
+                agent_user = next((a for a in token_agents if a.id == agent_id), None)
+                agent_name = _pick_agent_name(agent_user) if agent_user else f"Agent-{agent_id}"
                 ProjectService.upsert_team_member(db, project.id, agent_id, role, equity)
-                applied.append({"action": kind, "agent_id": agent_id, "role": role, "equity": equity, "reason": reason})
+                _append_progress(db, project, event_type="team_member_recruited",
+                                 content=f"{agent_name} 被招募为 {role}", agent_id=agent_id, agent_name=agent_name)
+                applied.append({"action": kind, "agent_id": agent_id, "name": agent_name, "role": role, "equity": equity, "reason": reason})
+            elif kind == "update":
+                agent_user = next((a for a in token_agents if a.id == agent_id), None)
+                agent_name = _pick_agent_name(agent_user) if agent_user else f"Agent-{agent_id}"
+                ProjectService.upsert_team_member(db, project.id, agent_id, role, equity)
+                applied.append({"action": kind, "agent_id": agent_id, "name": agent_name, "role": role, "equity": equity, "reason": reason})
             elif kind == "remove":
                 if agent_id == project.owner_id:
                     continue
+                agent_user = next((a for a in token_agents if a.id == agent_id), None)
+                agent_name = _pick_agent_name(agent_user) if agent_user else f"Agent-{agent_id}"
                 ProjectService.remove_team_member(db, project.id, agent_id)
-                applied.append({"action": kind, "agent_id": agent_id, "reason": reason})
+                _append_progress(db, project, event_type="team_member_left",
+                                 content=f"{agent_name} 离开团队", agent_id=agent_id, agent_name=agent_name)
+                applied.append({"action": kind, "agent_id": agent_id, "name": agent_name, "reason": reason})
             elif kind == "advance_stage":
                 to_stage = str(action.get("to_stage", "")).strip()
                 if to_stage in valid_stage_values and to_stage == allowed_transition:
