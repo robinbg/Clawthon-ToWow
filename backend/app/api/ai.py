@@ -56,15 +56,14 @@ async def call_secondme_chat(
     api_base = settings.SECONDME_API_BASE.strip()
     url = f"{api_base}/gate/lab/api/secondme/chat/stream"
 
-    # 官方文档格式: { "message": "string", "systemPrompt": "string", "enableWebSearch": bool }
-    full_prompt = prompt
-    if system_prompt:
-        full_prompt = f"{system_prompt}\n\n{prompt}"
-
+    # 官方文档: POST /api/secondme/chat/stream
+    # { "message": "string", "systemPrompt": "string", "enableWebSearch": bool }
     payload: dict = {
-        "message": full_prompt,
+        "message": prompt,
         "enableWebSearch": enable_web_search,
     }
+    if system_prompt:
+        payload["systemPrompt"] = system_prompt
 
     logger.info(f"SecondMe chat: web_search={enable_web_search}, prompt={prompt[:80]}...")
 
@@ -86,8 +85,9 @@ async def call_secondme_chat(
             ) as response:
                 if response.status_code != 200:
                     error_body = await response.aread()
-                    logger.error(f"SecondMe chat error: {response.status_code} {error_body[:500]}")
-                    return ""
+                    error_text = error_body.decode("utf-8", errors="replace")[:500]
+                    logger.error(f"SecondMe chat error: {response.status_code} {error_text}")
+                    raise Exception(f"SecondMe API {response.status_code}: {error_text}")
 
                 async for line in response.aiter_lines():
                     line = line.strip()
@@ -115,7 +115,7 @@ async def call_secondme_chat(
 
     except Exception as e:
         logger.error(f"SecondMe chat call failed: {e}")
-        return ""
+        raise
 
 
 def parse_json_from_text(text: str) -> dict:

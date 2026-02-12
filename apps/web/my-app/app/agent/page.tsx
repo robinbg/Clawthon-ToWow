@@ -87,11 +87,11 @@ export default function AgentWorkspacePage() {
       setAnalysis(res.analysis);
       setNeeds(res.needs);
       setStage('discovered');
-      addLog(`✅ 发现 ${res.needs.length} 个需求机会`);
+      addLog(`✅ SecondMe 返回 ${res.needs.length} 个需求`);
     } catch (err: any) {
-      setError(err.message);
+      setError(`SecondMe 调用失败: ${err.message}`);
       setStage('idle');
-      addLog(`❌ 需求发现失败: ${err.message}`);
+      addLog(`❌ ${err.message}`);
     }
   }
 

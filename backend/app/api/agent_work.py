@@ -68,119 +68,78 @@ class CreateFromNeedRequest(BaseModel):
 
 # ==================== Step 1: 发现需求 ====================
 
-@router.post("/discover-needs", response_model=DiscoverResponse)
+@router.post("/discover-needs")
 async def discover_needs(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Agent 自主发现需求和痛点 — 真实联网搜索"""
-    # 获取当前生态信息
+    """Agent 自主发现需求 — 真实 SecondMe + 联网搜索，无 fallback"""
+    if not current_user.access_token:
+        raise HTTPException(400, "缺少 SecondMe access token，请重新登录")
+
     all_projects = ProjectService.get_all_projects(db)
-    existing = [f"- {p.name}({p.product_type.value if p.product_type else '?'}): {p.description}" for p in all_projects[:10]]
-    existing_text = "\n".join(existing) if existing else "目前生态内还没有产品"
+    existing = [f"- {p.name}: {p.description}" for p in all_projects[:10]]
+    existing_text = "\n".join(existing) if existing else "（暂无）"
 
-    # Step 1: 先让 Agent 联网搜索当前 AI/互联网趋势
-    search_prompt = """请搜索互联网，了解以下信息：
-1. 2024-2025年最热门的 AI 应用趋势
-2. AI Agent 生态中最缺乏的工具和服务
-3. 人们在日常工作中最需要但还没被很好解决的 AI 工具
+    prompt = f"""请帮我做一次市场调研。请搜索互联网，了解当前 AI 应用和工具的最新趋势，然后发现 3 个真实可行的产品需求。
 
-请列出你搜索到的具体发现。"""
+## 平台背景
+Clawthon 是一个 AI 自治经济平台。Agent 可以开发面向人类的 Web 工具，也可以开发面向其他 Agent 的 API 服务。
 
-    system_prompt = """你是一个 AI 创业分析师，善于从互联网趋势中发现商机。
-请真实搜索互联网获取信息，不要编造数据。"""
-
-    search_result = ""
-    if current_user.access_token:
-        search_result = await call_secondme_chat(
-            current_user.access_token,
-            search_prompt,
-            enable_web_search=True,  # 真实联网搜索
-            system_prompt=system_prompt,
-        )
-    logger.info(f"Web search result length: {len(search_result)}")
-
-    # Step 2: 基于搜索结果 + 生态现状，生成具体产品需求
-    prompt = f"""你是一个 AI Agent（微型公司），运行在 Clawthon 平台上。
-
-## 你的互联网调研发现
-{search_result if search_result else "（联网搜索未返回结果，请基于你的知识分析）"}
-
-## Clawthon 平台说明
-Clawthon 是一个 AI 自治经济平台，Agent 之间可以：
-- 开发面向人类的产品（Web工具、数据分析、AI助手）
-- 开发面向 Agent 的服务（Skills技能、MCP接口、数据处理）
-- Agent 之间使用服务需要支付 CP（ClawPoints）
-
-## 当前生态已有产品
+## 平台现有产品
 {existing_text}
 
-## 你的状态
-- 名称：{current_user.name}
-- 预算：{current_user.budget} CP
+## 要求
+1. 请真实搜索互联网获取最新信息
+2. 每个需求要有明确的用户痛点和市场依据
+3. 产品要具体可开发
 
-## 任务
-基于你的互联网调研和生态现状，发现 3 个最有价值的产品需求。
-需求必须是具体的、可开发的、有明确目标用户的。
-
-请严格用以下 JSON 格式回复（不要其他内容）：
+请用 JSON 格式回复：
 {{
-  "analysis": "基于互联网调研的市场分析（100字以内）",
+  "analysis": "你的调研发现",
   "needs": [
     {{
-      "title": "具体的产品名称",
-      "pain_point": "解决什么真实痛点（50字以内）",
+      "title": "产品名称",
+      "pain_point": "解决什么痛点",
       "target_users": "human 或 agent 或 both",
       "product_type": "agent_skill 或 agent_mcp 或 agent_service 或 human_web",
-      "market_size": "预估市场规模（30字以内）",
+      "market_size": "市场规模",
       "confidence": "high 或 medium 或 low"
     }}
   ]
 }}"""
 
-    ai_text = ""
-    if current_user.access_token:
+    try:
         ai_text = await call_secondme_chat(
             current_user.access_token,
             prompt,
-            enable_web_search=False,  # Step 2 不需要再搜索，用 Step 1 的结果
+            enable_web_search=True,
         )
+    except Exception as e:
+        raise HTTPException(502, f"SecondMe 调用失败: {str(e)[:300]}")
 
-    parsed = parse_json_from_text(ai_text) if ai_text else {}
+    if not ai_text:
+        raise HTTPException(502, "SecondMe 未返回内容，请确认已授权 chat 权限")
 
-    # 兜底
+    logger.info(f"SecondMe raw ({len(ai_text)} chars): {ai_text[:500]}...")
+
+    parsed = parse_json_from_text(ai_text)
+
     if not parsed.get("needs"):
-        parsed = {
-            "analysis": "当前生态缺少基础工具类服务，Agent之间协作效率低",
-            "needs": [
-                {
-                    "title": "智能文本处理器",
-                    "pain_point": "Agent处理文本任务时缺少高效的预处理工具",
-                    "target_users": "agent",
-                    "product_type": "agent_skill",
-                    "market_size": "所有文本类Agent都需要",
-                    "confidence": "high",
-                },
-                {
-                    "title": "数据可视化生成器",
-                    "pain_point": "人类用户需要快速将数据转化为图表",
-                    "target_users": "human",
-                    "product_type": "human_web",
-                    "market_size": "面向所有数据分析需求",
-                    "confidence": "medium",
-                },
-                {
-                    "title": "Agent性能监控服务",
-                    "pain_point": "Agent无法了解自己的服务被调用的效果和性能",
-                    "target_users": "agent",
-                    "product_type": "agent_service",
-                    "market_size": "所有提供服务的Agent",
-                    "confidence": "medium",
-                },
-            ],
+        # 不 fallback，返回原始回复让用户看到
+        return {
+            "analysis": f"SecondMe 回复了但无法解析为 JSON。原始回复：\n\n{ai_text[:800]}",
+            "needs": [{
+                "title": "⚠️ 解析失败 - 请重试",
+                "pain_point": ai_text[:100],
+                "target_users": "both",
+                "product_type": "human_web",
+                "market_size": "N/A",
+                "confidence": "low",
+            }],
         }
 
-    return DiscoverResponse(**parsed)
+    return parsed
 
 
 # ==================== Step 1.5: 从需求创建项目 ====================
@@ -250,39 +209,33 @@ async def generate_prd(
   "full_prd": "完整的PRD文档内容（200字以内，用markdown格式）"
 }}"""
 
-    # 先联网搜索竞品
-    competitor_info = ""
-    if current_user.access_token:
+    if not current_user.access_token:
+        raise HTTPException(400, "缺少 SecondMe token")
+
+    # 联网搜索竞品
+    try:
         competitor_info = await call_secondme_chat(
             current_user.access_token,
-            f"请搜索互联网，找到与「{project.name} - {project.description}」类似的现有产品或服务，分析它们的优缺点。",
+            f"请搜索互联网，找到与「{project.name} - {project.description}」类似的现有产品或服务，分析优缺点。",
             enable_web_search=True,
         )
+        if competitor_info:
+            prompt += f"\n\n## 竞品调研\n{competitor_info[:500]}"
+    except Exception as e:
+        logger.warning(f"Competitor search failed: {e}")
 
-    if competitor_info:
-        prompt += f"\n\n## 竞品调研\n{competitor_info[:500]}"
-
-    ai_text = ""
-    if current_user.access_token:
+    try:
         ai_text = await call_secondme_chat(current_user.access_token, prompt)
+    except Exception as e:
+        raise HTTPException(502, f"SecondMe PRD 生成失败: {str(e)[:300]}")
 
-    parsed = parse_json_from_text(ai_text) if ai_text else {}
+    if not ai_text:
+        raise HTTPException(502, "SecondMe 未返回内容")
+
+    parsed = parse_json_from_text(ai_text)
 
     if not parsed.get("overview"):
-        is_agent = "agent" in (project.product_type.value if project.product_type else "")
-        parsed = {
-            "overview": f"{project.name} - {project.description}",
-            "target_users": "Agent开发者" if is_agent else "人类用户",
-            "core_features": [
-                "核心功能处理引擎",
-                "输入验证与格式化" if is_agent else "响应式用户界面",
-                "结果输出与缓存" if is_agent else "数据展示与导出",
-            ],
-            "tech_stack": "Python + FastAPI" if is_agent else "HTML + CSS + JavaScript",
-            "mvp_scope": f"实现{project.name}的核心功能，支持基本输入输出",
-            "success_metrics": "被至少3个Agent调用" if is_agent else "日活用户>10",
-            "full_prd": f"# {project.name} PRD\n\n## 概述\n{project.description}\n\n## 核心功能\n- 功能处理引擎\n- 输入验证\n- 结果展示",
-        }
+        raise HTTPException(422, f"无法解析 PRD。原始回复:\n\n{ai_text[:800]}")
 
     # 保存 PRD 到项目
     project.prd_content = parsed.get("full_prd", "")
@@ -356,15 +309,21 @@ PRD：{prd[:500]}
   "features": ["实现的功能1", "功能2", "功能3"]
 }}"""
 
-    ai_text = ""
-    if current_user.access_token:
+    if not current_user.access_token:
+        raise HTTPException(400, "缺少 SecondMe token")
+
+    try:
         ai_text = await call_secondme_chat(current_user.access_token, prompt)
+    except Exception as e:
+        raise HTTPException(502, f"SecondMe MVP 开发失败: {str(e)[:300]}")
 
-    parsed = parse_json_from_text(ai_text) if ai_text else {}
+    if not ai_text:
+        raise HTTPException(502, "SecondMe 未返回内容")
 
-    # 如果 AI 没返回有效HTML，生成一个默认的
-    if not parsed.get("html") or len(parsed.get("html", "")) < 100:
-        parsed = _generate_fallback_mvp(project, current_user)
+    parsed = parse_json_from_text(ai_text)
+
+    if not parsed.get("html") or len(parsed.get("html", "")) < 50:
+        raise HTTPException(422, f"无法解析 MVP 代码。原始回复:\n\n{ai_text[:1000]}")
 
     # 保存到项目
     project.prd_content = (project.prd_content or "") + "\n\n---\n\n## MVP代码\n```html\n" + parsed["html"][:5000] + "\n```"
