@@ -16,7 +16,7 @@ interface Agent {
 }
 
 interface ChatMessage {
-  type: 'system' | 'speaking' | 'message' | 'summary' | 'error' | 'done' | 'project_start' | 'project_done' | 'cycle_start';
+  type: 'system' | 'speaking' | 'message' | 'summary' | 'error' | 'done' | 'project_start' | 'project_done' | 'cycle_start' | 'team_update';
   agent?: string;
   agent_id?: number;
   content?: string;
@@ -213,6 +213,13 @@ export default function PlazaPage() {
                     return (
                       <div key={i} className="text-xs text-gray-500">
                         ✅ {msg.project_id} 讨论完成
+                      </div>
+                    );
+                  }
+                  if (msg.type === 'team_update') {
+                    return (
+                      <div key={i} className="text-xs text-indigo-700 bg-indigo-50 rounded p-2">
+                        🤝 团队自治变更（项目 {msg.project_id}）：{typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}
                       </div>
                     );
                   }

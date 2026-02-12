@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
 from ..models.database import Project, ProjectStatus, ProductType, User, get_db
+from ..services.project_service import ProjectService
 from .ai import call_secondme_chat, parse_json_from_text
 from .auth import get_current_user
 
@@ -173,6 +174,81 @@ def _flatten_discussions(projects_payload: list[dict[str, Any]]) -> list[dict[st
     events.sort(key=lambda x: x.get("ts") or "")
     return events
 
+
+async def _autonomous_team_governance(
+    *,
+    db: Session,
+    project: Project,
+    token_agents: list[User],
+    fallback_token: str,
+) -> list[dict[str, Any]]:
+    """Let SecondMe Agent decide team changes for an existing project."""
+    members = []
+    try:
+        members = json.loads(project.team_members) if project.team_members else []
+    except Exception:
+        members = []
+    if not isinstance(members, list):
+        members = []
+
+    owner = next((u for u in token_agents if u.id == project.owner_id and u.access_token), None)
+    decider = owner or (token_agents[0] if token_agents else None)
+    if not decider:
+        return []
+
+    member_ids = [m.get("agent_id") for m in members if isinstance(m, dict)]
+    candidates = [
+        {"id": a.id, "name": _pick_agent_name(a), "budget": a.budget}
+        for a in token_agents
+        if a.id not in member_ids
+    ][:8]
+
+    prompt = (
+        f"你是项目治理 Agent。请为项目「{project.name}」做团队调整决策。\n"
+        f"当前成员：{json.dumps(members, ensure_ascii=False)}\n"
+        f"可招募候选：{json.dumps(candidates, ensure_ascii=False)}\n"
+        "请仅返回 JSON："
+        '{"actions":[{"action":"add|remove|update|none","agent_id":0,"role":"member","equity":10,"reason":""}]}\n'
+        "约束：\n"
+        "1) 最多返回 2 个动作\n"
+        "2) 不能移除 owner\n"
+        "3) 如果无需调整，返回 action=none\n"
+    )
+    raw = await call_secondme_chat(
+        decider.access_token or fallback_token,
+        prompt,
+        system_prompt="你是团队治理决策器，只返回有效 JSON。",
+        enable_web_search=False,
+    )
+    parsed = parse_json_from_text(raw)
+    actions = parsed.get("actions")
+    if not isinstance(actions, list):
+        return []
+
+    applied: list[dict[str, Any]] = []
+    for action in actions[:2]:
+        if not isinstance(action, dict):
+            continue
+        kind = str(action.get("action", "none")).lower()
+        if kind == "none":
+            continue
+        agent_id = int(action.get("agent_id", 0) or 0)
+        role = str(action.get("role", "member"))
+        equity = float(action.get("equity", 10) or 10)
+        reason = str(action.get("reason", "")).strip()
+        try:
+            if kind in ("add", "update"):
+                ProjectService.upsert_team_member(db, project.id, agent_id, role, equity)
+                applied.append({"action": kind, "agent_id": agent_id, "role": role, "equity": equity, "reason": reason})
+            elif kind == "remove":
+                if agent_id == project.owner_id:
+                    continue
+                ProjectService.remove_team_member(db, project.id, agent_id)
+                applied.append({"action": kind, "agent_id": agent_id, "reason": reason})
+        except Exception:
+            continue
+    return applied
+
 @router.get("/agents")
 async def list_agents(
     current_user: User = Depends(get_current_user),
@@ -277,6 +353,35 @@ async def autonomous_feed(
                         "content": "检测到无新 Agent 加入，沿用现有群聊与项目进度，不重新开场。",
                     }
                 )
+            yield _to_sse(
+                {
+                    "type": "system",
+                    "content": "Agent 正在对现有项目执行团队自治治理（招募/退出/调整）...",
+                }
+            )
+            for p in existing_projects[-5:]:
+                try:
+                    changes = await _autonomous_team_governance(
+                        db=db,
+                        project=p,
+                        token_agents=token_agents,
+                        fallback_token=current_user.access_token,
+                    )
+                    for c in changes:
+                        yield _to_sse(
+                            {
+                                "type": "team_update",
+                                "project_id": p.id,
+                                "content": c,
+                            }
+                        )
+                except Exception as e:
+                    yield _to_sse(
+                        {
+                            "type": "error",
+                            "content": f"团队自治治理失败(project={p.id}): {str(e)[:120]}",
+                        }
+                    )
             yield _to_sse({"type": "done", "reused_history": True})
             return
 
@@ -445,6 +550,28 @@ async def autonomous_feed(
                         "db_project_id": db_project.id,
                     }
                 )
+                try:
+                    changes = await _autonomous_team_governance(
+                        db=db,
+                        project=db_project,
+                        token_agents=token_agents,
+                        fallback_token=current_user.access_token,
+                    )
+                    for c in changes:
+                        yield _to_sse(
+                            {
+                                "type": "team_update",
+                                "project_id": db_project.id,
+                                "content": c,
+                            }
+                        )
+                except Exception as e:
+                    yield _to_sse(
+                        {
+                            "type": "error",
+                            "content": f"团队自治治理失败(project={db_project.id}): {str(e)[:120]}",
+                        }
+                    )
 
         yield _to_sse({"type": "done"})
 
