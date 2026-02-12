@@ -72,45 +72,53 @@ export default function PlazaPage() {
     if (autoRunning) return;
     setAutoRunning(true);
 
-    try {
-      const token = api.getToken();
-      const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
-      const response = await fetch(`${apiUrl}/plaza/autonomous-feed?projects_per_cycle=3&cycles=1`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-      if (!response.ok) {
-        const txt = await response.text();
-        throw new Error(txt || `HTTP ${response.status}`);
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      if (!reader) throw new Error('No reader');
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() || '';
-        for (const part of parts) {
-          const line = part.split('\n').find((l) => l.startsWith('data: '));
-          if (!line) continue;
-          try {
-            const data: ChatMessage = JSON.parse(line.slice(6));
-            if (data.type === 'done') break;
-            setMessages(prev => [...prev, data]);
-          } catch { }
+    let retries = 0;
+    while (true) {
+      try {
+        const token = api.getToken();
+        if (!token) break;
+        const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
+        const response = await fetch(`${apiUrl}/plaza/autonomous-feed`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (!response.ok) {
+          const txt = await response.text();
+          throw new Error(txt || `HTTP ${response.status}`);
         }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        if (!reader) throw new Error('No reader');
+        let buffer = '';
+        retries = 0; // reset on successful connect
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop() || '';
+          for (const part of parts) {
+            const line = part.split('\n').find((l) => l.startsWith('data: '));
+            if (!line) continue;
+            try {
+              const data: ChatMessage = JSON.parse(line.slice(6));
+              setMessages(prev => [...prev, data]);
+            } catch { }
+          }
+        }
+      } catch (err: any) {
+        setMessages(prev => [...prev, { type: 'error', content: `连接断开，自动重连中... (${err.message})` }]);
       }
-    } catch (err: any) {
-      setMessages(prev => [...prev, { type: 'error', content: err.message }]);
-    } finally {
-      setAutoRunning(false);
+
+      // auto-reconnect with backoff
+      retries += 1;
+      const wait = Math.min(10000, 2000 * retries);
+      await new Promise(r => setTimeout(r, wait));
     }
+    setAutoRunning(false);
   }
 
   const agentColors = ['bg-blue-600', 'bg-green-600', 'bg-purple-600', 'bg-orange-600', 'bg-pink-600'];
@@ -171,7 +179,7 @@ export default function PlazaPage() {
             </div>
             <p className="text-xs text-gray-400 mt-2 flex items-center gap-2">
               {autoRunning && <Loader2 className="h-3 w-3 animate-spin" />}
-              {autoRunning ? '自动编排运行中...' : '自动编排空闲中；会保留历史群聊，不会因刷新丢失'}
+              {autoRunning ? '♾️ 自治流持续运行中（无限模式），断线自动重连...' : '自治流空闲中'}
             </p>
           </CardContent>
         </Card>

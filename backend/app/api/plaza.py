@@ -1,12 +1,13 @@
 """Agent Plaza autonomous teaming and activity stream."""
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -544,12 +545,11 @@ async def list_discussions(
 
 @router.post("/autonomous-feed")
 async def autonomous_feed(
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    projects_per_cycle: int = Query(default=3, ge=1, le=6),
-    cycles: int = Query(default=1, ge=1, le=3),
 ):
-    """Autonomous multi-project orchestration with SSE activity feed."""
+    """Infinite autonomous stream — keeps generating projects until client disconnects."""
     if not current_user.access_token:
         raise HTTPException(400, "缺少 SecondMe token")
 
@@ -557,119 +557,72 @@ async def autonomous_feed(
     url = f"{api_base}/gate/lab/api/secondme/chat/stream"
 
     async def stream():
+        project_seq = 0
+
+        # ---- initial: govern existing projects first ----
+        existing_projects = _get_autonomous_projects(db, limit=500)
+        project_seq = len(existing_projects)
+
         all_agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
         token_agents = [a for a in all_agents if a.access_token]
         if not any(a.id == current_user.id for a in token_agents):
             token_agents.insert(0, current_user)
-        if not token_agents:
-            raise HTTPException(400, "暂无可用 Agent token")
 
-        existing_projects = _get_autonomous_projects(db, limit=200)
-        known_agent_ids: set[int] = set()
-        for p in existing_projects:
-            try:
-                members = json.loads(p.team_members) if p.team_members else []
-            except Exception:
-                members = []
-            for m in members:
-                if isinstance(m, dict) and isinstance(m.get("agent_id"), int):
-                    known_agent_ids.add(m["agent_id"])
-        token_agent_ids = {a.id for a in token_agents}
-        new_joined_agent_ids = token_agent_ids - known_agent_ids
+        yield _to_sse({
+            "type": "system",
+            "content": f"♾️ 自治流已启动（无限模式）：{len(token_agents)} 个 Agent 在线，已有 {project_seq} 个项目。持续产生新项目...",
+        })
 
         if existing_projects:
-            if new_joined_agent_ids:
-                joined = [a for a in token_agents if a.id in new_joined_agent_ids]
-                joined_names = ", ".join(_pick_agent_name(a) for a in joined)
-                yield _to_sse(
-                    {
-                        "type": "system",
-                        "content": f"新 Agent 加入群聊：{joined_names}。沿用现有会话，不重开新局。",
-                    }
-                )
-            else:
-                yield _to_sse(
-                    {
-                        "type": "system",
-                        "content": "检测到无新 Agent 加入，沿用现有群聊与项目进度，不重新开场。",
-                    }
-                )
-            yield _to_sse(
-                {
-                    "type": "system",
-                    "content": "Agent 正在对现有项目执行团队自治治理（招募/退出/调整）...",
-                }
-            )
-            for p in existing_projects[-5:]:
+            yield _to_sse({"type": "system", "content": "先对最近项目执行一轮治理与经济循环..."})
+            for p in existing_projects[-3:]:
+                if await request.is_disconnected():
+                    return
                 try:
-                    changes = await _autonomous_team_governance(
-                        db=db,
-                        project=p,
-                        token_agents=token_agents,
-                        fallback_token=current_user.access_token,
-                    )
+                    changes = await _autonomous_team_governance(db=db, project=p, token_agents=token_agents, fallback_token=current_user.access_token)
                     for c in changes:
-                        yield _to_sse(
-                            {
-                                "type": "team_update",
-                                "project_id": p.id,
-                                "content": c,
-                            }
-                        )
-                    econ_updates = await _autonomous_economy_cycle(
-                        db=db,
-                        project=p,
-                        token_agents=token_agents,
-                        fallback_token=current_user.access_token,
-                    )
-                    for e in econ_updates:
-                        yield _to_sse(
-                            {
-                                "type": "economic_update",
-                                "project_id": p.id,
-                                "content": e,
-                            }
-                        )
-                except Exception as e:
-                    yield _to_sse(
-                        {
-                            "type": "error",
-                            "content": f"团队自治治理失败(project={p.id}): {str(e)[:120]}",
-                        }
-                    )
-            yield _to_sse({"type": "done", "reused_history": True})
-            return
+                        yield _to_sse({"type": "team_update", "project_id": p.id, "content": c})
+                    econ = await _autonomous_economy_cycle(db=db, project=p, token_agents=token_agents, fallback_token=current_user.access_token)
+                    for e in econ:
+                        yield _to_sse({"type": "economic_update", "project_id": p.id, "content": e})
+                except Exception as exc:
+                    yield _to_sse({"type": "error", "content": f"治理失败(#{p.id}): {str(exc)[:100]}"})
 
-        yield _to_sse(
-            {
-                "type": "system",
-                "content": f"自动编排已启动：{len(token_agents)} 个活跃 Agent，{cycles} 轮，每轮 {projects_per_cycle} 个项目",
-            }
-        )
+        # ---- infinite loop: keep generating new projects ----
+        while True:
+            if await request.is_disconnected():
+                return
 
-        for cycle in range(cycles):
-            topics = await _generate_project_topics(
-                current_user.access_token,
-                projects_per_cycle,
-            )
-            yield _to_sse(
-                {
-                    "type": "cycle_start",
-                    "cycle": cycle + 1,
-                    "content": f"第 {cycle + 1} 轮启动，共 {len(topics)} 个项目",
-                }
-            )
+            # refresh agent list each round
+            all_agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
+            token_agents = [a for a in all_agents if a.access_token]
+            if not any(a.id == current_user.id for a in token_agents):
+                token_agents.insert(0, current_user)
+            if not token_agents:
+                yield _to_sse({"type": "system", "content": "暂无可用 Agent，等待中..."})
+                await asyncio.sleep(5)
+                continue
 
-            for idx, topic in enumerate(topics):
-                project_id = f"c{cycle + 1}-p{idx + 1}"
-                lead = token_agents[idx % len(token_agents)]
-                if len(token_agents) >= 2 and (idx % 2 == 1):
-                    # Team mode
+            # generate 1 topic per iteration
+            try:
+                topics = await _generate_project_topics(current_user.access_token, 1)
+            except Exception as exc:
+                yield _to_sse({"type": "error", "content": f"生成主题失败: {str(exc)[:100]}"})
+                await asyncio.sleep(3)
+                continue
+
+            for topic in topics:
+                if await request.is_disconnected():
+                    return
+
+                project_seq += 1
+                project_id = f"p{project_seq}"
+                lead = token_agents[(project_seq - 1) % len(token_agents)]
+                if len(token_agents) >= 2 and (project_seq % 2 == 0):
                     others = [a for a in token_agents if a.id != lead.id][:2]
                     participants = [lead] + others
                     mode = "team"
                 else:
-                    # Solo mode
                     participants = [lead]
                     mode = "solo"
 
@@ -681,169 +634,74 @@ async def autonomous_feed(
                     owner_id=lead.id,
                     team_members=_build_team_members(participants, mode),
                     valuation=1000.0,
-                    prd_content=json.dumps(
-                        {
-                            "source": "autonomous_plaza",
-                            "external_project_id": project_id,
-                            "topic": topic,
-                            "mode": mode,
-                            "progress": [
-                                {
-                                    "ts": _utc_now(),
-                                    "event_type": "project_start",
-                                    "content": f"{project_id} started",
-                                }
-                            ],
-                        },
-                        ensure_ascii=False,
-                    ),
+                    prd_content=json.dumps({
+                        "source": "autonomous_plaza",
+                        "external_project_id": project_id,
+                        "topic": topic,
+                        "mode": mode,
+                        "progress": [{"ts": _utc_now(), "event_type": "project_start", "content": f"{project_id} started"}],
+                    }, ensure_ascii=False),
                 )
                 db.add(db_project)
                 db.commit()
                 db.refresh(db_project)
 
-                yield _to_sse(
-                    {
-                        "type": "project_start",
-                        "project_id": project_id,
-                        "db_project_id": db_project.id,
-                        "topic": topic,
-                        "mode": mode,
-                        "participants": [
-                            {"id": p.id, "name": _pick_agent_name(p)} for p in participants
-                        ],
-                    }
-                )
+                yield _to_sse({
+                    "type": "project_start",
+                    "project_id": project_id,
+                    "db_project_id": db_project.id,
+                    "topic": topic,
+                    "mode": mode,
+                    "participants": [{"id": p.id, "name": _pick_agent_name(p)} for p in participants],
+                })
 
+                # discussion rounds
                 context: list[str] = []
                 for turn, speaker in enumerate(participants):
-                    yield _to_sse(
-                        {
-                            "type": "speaking",
-                            "project_id": project_id,
-                            "agent": _pick_agent_name(speaker),
-                            "agent_id": speaker.id,
-                        }
-                    )
-                    prompt = _compose_speaker_prompt(
-                        topic=topic,
-                        speaker=speaker,
-                        prior_context="\n".join(context[-6:]),
-                        turn=turn,
-                        mode=mode,
-                    )
-                    reply = await _stream_agent_reply(
-                        url=url,
-                        token=speaker.access_token,
-                        prompt=prompt,
-                        web_search=(turn == 0),
-                    )
+                    if await request.is_disconnected():
+                        return
+                    yield _to_sse({"type": "speaking", "project_id": project_id, "agent": _pick_agent_name(speaker), "agent_id": speaker.id})
+                    prompt = _compose_speaker_prompt(topic=topic, speaker=speaker, prior_context="\n".join(context[-6:]), turn=turn, mode=mode)
+                    reply = await _stream_agent_reply(url=url, token=speaker.access_token, prompt=prompt, web_search=(turn == 0))
                     context.append(f"{_pick_agent_name(speaker)}: {reply}")
-                    _append_progress(
-                        db,
-                        db_project,
-                        event_type="message",
-                        content=reply,
-                        agent_id=speaker.id,
-                        agent_name=_pick_agent_name(speaker),
-                    )
-                    yield _to_sse(
-                        {
-                            "type": "message",
-                            "project_id": project_id,
-                            "db_project_id": db_project.id,
-                            "topic": topic,
-                            "mode": mode,
-                            "agent": _pick_agent_name(speaker),
-                            "agent_id": speaker.id,
-                            "round": turn + 1,
-                            "content": reply,
-                        }
-                    )
+                    _append_progress(db, db_project, event_type="message", content=reply, agent_id=speaker.id, agent_name=_pick_agent_name(speaker))
+                    yield _to_sse({
+                        "type": "message", "project_id": project_id, "db_project_id": db_project.id,
+                        "topic": topic, "mode": mode, "agent": _pick_agent_name(speaker),
+                        "agent_id": speaker.id, "round": turn + 1, "content": reply,
+                    })
 
+                # summary
                 summary_prompt = (
-                    f"以下是 Agent 对项目主题「{topic}」的讨论：\n\n"
-                    f"{chr(10).join(context)}\n\n"
+                    f"以下是 Agent 对项目主题「{topic}」的讨论：\n\n{chr(10).join(context)}\n\n"
                     "请输出 JSON："
                     '{"team_name":"", "project_idea":"", "members":[{"name":"","role":"","contribution":""}], "next_steps":[""]}'
                 )
-                summary = await _stream_agent_reply(
-                    url=url,
-                    token=lead.access_token,
-                    prompt=summary_prompt,
-                    web_search=False,
-                )
+                summary = await _stream_agent_reply(url=url, token=lead.access_token, prompt=summary_prompt, web_search=False)
                 parsed_summary = parse_json_from_text(summary)
                 if isinstance(parsed_summary, dict):
-                    project_idea = parsed_summary.get("project_idea")
-                    if isinstance(project_idea, str) and project_idea.strip():
-                        db_project.description = project_idea.strip()[:1000]
+                    idea = parsed_summary.get("project_idea")
+                    if isinstance(idea, str) and idea.strip():
+                        db_project.description = idea.strip()[:1000]
                 if db_project.status == ProjectStatus.EXPLORING:
                     db_project.status = ProjectStatus.TEAM_FORMING
-                _append_progress(
-                    db,
-                    db_project,
-                    event_type="summary",
-                    content=summary[:2000],
-                    agent_id=lead.id,
-                    agent_name=_pick_agent_name(lead),
-                )
+                _append_progress(db, db_project, event_type="summary", content=summary[:2000], agent_id=lead.id, agent_name=_pick_agent_name(lead))
+                yield _to_sse({"type": "summary", "project_id": project_id, "db_project_id": db_project.id, "topic": topic, "mode": mode, "content": summary})
+                yield _to_sse({"type": "project_done", "project_id": project_id, "db_project_id": db_project.id})
 
-                yield _to_sse(
-                    {
-                        "type": "summary",
-                        "project_id": project_id,
-                        "db_project_id": db_project.id,
-                        "topic": topic,
-                        "mode": mode,
-                        "content": summary,
-                    }
-                )
-                yield _to_sse(
-                    {
-                        "type": "project_done",
-                        "project_id": project_id,
-                        "db_project_id": db_project.id,
-                    }
-                )
+                # governance + economy
                 try:
-                    changes = await _autonomous_team_governance(
-                        db=db,
-                        project=db_project,
-                        token_agents=token_agents,
-                        fallback_token=current_user.access_token,
-                    )
+                    changes = await _autonomous_team_governance(db=db, project=db_project, token_agents=token_agents, fallback_token=current_user.access_token)
                     for c in changes:
-                        yield _to_sse(
-                            {
-                                "type": "team_update",
-                                "project_id": db_project.id,
-                                "content": c,
-                            }
-                        )
-                    econ_updates = await _autonomous_economy_cycle(
-                        db=db,
-                        project=db_project,
-                        token_agents=token_agents,
-                        fallback_token=current_user.access_token,
-                    )
-                    for e in econ_updates:
-                        yield _to_sse(
-                            {
-                                "type": "economic_update",
-                                "project_id": db_project.id,
-                                "content": e,
-                            }
-                        )
-                except Exception as e:
-                    yield _to_sse(
-                        {
-                            "type": "error",
-                            "content": f"团队自治治理失败(project={db_project.id}): {str(e)[:120]}",
-                        }
-                    )
+                        yield _to_sse({"type": "team_update", "project_id": db_project.id, "content": c})
+                    econ = await _autonomous_economy_cycle(db=db, project=db_project, token_agents=token_agents, fallback_token=current_user.access_token)
+                    for e in econ:
+                        yield _to_sse({"type": "economic_update", "project_id": db_project.id, "content": e})
+                except Exception as exc:
+                    yield _to_sse({"type": "error", "content": f"治理失败(#{db_project.id}): {str(exc)[:100]}"})
 
-        yield _to_sse({"type": "done"})
+            # brief pause between projects
+            await asyncio.sleep(2)
 
     return StreamingResponse(
         stream(),
