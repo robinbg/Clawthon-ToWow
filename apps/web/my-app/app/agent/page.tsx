@@ -63,6 +63,7 @@ export default function AgentWorkspacePage() {
   const [prd, setPrd] = useState<PRD | null>(null);
   const [mvp, setMvp] = useState<MVP | null>(null);
   const [error, setError] = useState('');
+  const [thinking, setThinking] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
   const router = useRouter();
 
@@ -76,18 +77,73 @@ export default function AgentWorkspacePage() {
     setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   }
 
-  // Step 1: 发现需求
+  // Step 1: 发现需求（流式）
   async function discoverNeeds() {
     setStage('discovering');
     setError('');
-    addLog('🔍 Agent 开始扫描生态，分析需求和痛点...');
+    setThinking('');
+    addLog('🌐 Agent 正在搜索互联网，发现真实需求...');
 
     try {
-      const res = await api.request<{ analysis: string; needs: Need[] }>('/agent/discover-needs', { method: 'POST' });
-      setAnalysis(res.analysis);
-      setNeeds(res.needs);
-      setStage('discovered');
-      addLog(`✅ SecondMe 返回 ${res.needs.length} 个需求`);
+      const token = api.getToken();
+      const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
+
+      const response = await fetch(`${apiUrl}/agent/discover-needs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok && !response.headers.get('content-type')?.includes('event-stream')) {
+        const text = await response.text();
+        throw new Error(`HTTP ${response.status}: ${text.substring(0, 200)}`);
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      if (!reader) throw new Error('No reader');
+
+      let fullThinking = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === 'progress') {
+              fullThinking += data.content;
+              setThinking(fullThinking);
+            } else if (data.type === 'result') {
+              setAnalysis(data.data.analysis);
+              setNeeds(data.data.needs);
+              setStage('discovered');
+              addLog(`✅ 发现 ${data.data.needs.length} 个真实需求`);
+            } else if (data.type === 'raw') {
+              setError(`SecondMe 回复了但无法解析为需求列表。请重试。\n\n原始回复片段：${data.content.substring(0, 300)}`);
+              setStage('idle');
+            } else if (data.type === 'error') {
+              throw new Error(data.content);
+            }
+          } catch (e: any) {
+            if (e.message && !e.message.includes('JSON')) {
+              throw e;
+            }
+          }
+        }
+      }
+
+      if (stage === 'discovering') {
+        // 流结束但没收到 result
+        setStage('idle');
+        if (!error) setError('流式响应结束但未收到结果，请重试');
+      }
+
     } catch (err: any) {
       setError(`SecondMe 调用失败: ${err.message}`);
       setStage('idle');
@@ -243,20 +299,26 @@ export default function AgentWorkspacePage() {
           {/* Loading */}
           {isLoading && (
             <Card>
-              <CardContent className="py-8 text-center">
-                <Loader2 className="h-8 w-8 text-blue-600 mx-auto mb-3 animate-spin" />
-                <p className="text-gray-600">
-                  {stage === 'discovering' && '🌐 Agent 正在搜索互联网，分析真实市场趋势和痛点...'}
-                  {stage === 'creating' && '📋 正在创建项目...'}
-                  {stage === 'prd-generating' && '📝 Agent 正在搜索竞品并撰写 PRD...'}
-                  {stage === 'developing' && '🔨 Agent 正在编写代码（可能需要 30-60 秒）...'}
-                  {stage === 'launching' && '🚀 正在上线...'}
-                </p>
-                {(stage === 'discovering' || stage === 'prd-generating') && (
-                  <p className="text-xs text-blue-500 mt-2 flex items-center gap-1">
-                    <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
-                    正在通过 SecondMe 访问公开互联网...
+              <CardContent className="py-6">
+                <div className="flex items-center gap-3 mb-3">
+                  <Loader2 className="h-6 w-6 text-blue-600 animate-spin flex-shrink-0" />
+                  <p className="text-gray-600">
+                    {stage === 'discovering' && '🌐 SecondMe 正在搜索互联网...'}
+                    {stage === 'creating' && '📋 正在创建项目...'}
+                    {stage === 'prd-generating' && '📝 Agent 正在撰写 PRD...'}
+                    {stage === 'developing' && '🔨 Agent 正在编写代码...'}
+                    {stage === 'launching' && '🚀 正在上线...'}
                   </p>
+                </div>
+                {/* 实时显示 SecondMe 的思考过程 */}
+                {thinking && stage === 'discovering' && (
+                  <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-700 max-h-64 overflow-y-auto whitespace-pre-wrap border">
+                    <p className="text-xs text-blue-500 font-medium mb-2 flex items-center gap-1">
+                      <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+                      SecondMe Agent 实时思考：
+                    </p>
+                    {thinking}
+                  </div>
                 )}
               </CardContent>
             </Card>

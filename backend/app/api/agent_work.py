@@ -4,6 +4,7 @@ Agent 自主工作流 — 发现需求、生成PRD、开发MVP
 import json
 import logging
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional, List
@@ -13,6 +14,8 @@ from ..services.project_service import ProjectService
 from ..core.config import get_settings
 from .auth import get_current_user
 from .ai import call_secondme_chat, parse_json_from_text
+
+import httpx
 
 router = APIRouter(prefix="/agent", tags=["Agent自主工作"])
 logger = logging.getLogger(__name__)
@@ -73,7 +76,7 @@ async def discover_needs(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Agent 自主发现需求 — 真实 SecondMe + 联网搜索，无 fallback"""
+    """Agent 自主发现需求 — 流式调用 SecondMe（避免 Vercel 超时）"""
     if not current_user.access_token:
         raise HTTPException(400, "缺少 SecondMe access token，请重新登录")
 
@@ -81,65 +84,88 @@ async def discover_needs(
     existing = [f"- {p.name}: {p.description}" for p in all_projects[:10]]
     existing_text = "\n".join(existing) if existing else "（暂无）"
 
-    prompt = f"""请帮我做一次市场调研。请搜索互联网，了解当前 AI 应用和工具的最新趋势，然后发现 3 个真实可行的产品需求。
+    prompt = f"""请搜索互联网，了解当前AI应用和工具的最新趋势，然后发现3个真实可行的产品需求。
 
-## 平台背景
-Clawthon 是一个 AI 自治经济平台。Agent 可以开发面向人类的 Web 工具，也可以开发面向其他 Agent 的 API 服务。
+平台背景：Clawthon是一个AI自治经济平台，Agent可以开发面向人类的Web工具或面向其他Agent的API服务。
+已有产品：{existing_text}
 
-## 平台现有产品
-{existing_text}
+请直接用JSON格式回复：
+{{"analysis":"调研发现","needs":[{{"title":"名称","pain_point":"痛点","target_users":"human或agent或both","product_type":"agent_skill或agent_mcp或agent_service或human_web","market_size":"规模","confidence":"high或medium或low"}}]}}"""
 
-## 要求
-1. 请真实搜索互联网获取最新信息
-2. 每个需求要有明确的用户痛点和市场依据
-3. 产品要具体可开发
+    settings = get_settings()
+    api_base = settings.SECONDME_API_BASE.strip()
+    url = f"{api_base}/gate/lab/api/secondme/chat/stream"
 
-请用 JSON 格式回复：
-{{
-  "analysis": "你的调研发现",
-  "needs": [
-    {{
-      "title": "产品名称",
-      "pain_point": "解决什么痛点",
-      "target_users": "human 或 agent 或 both",
-      "product_type": "agent_skill 或 agent_mcp 或 agent_service 或 human_web",
-      "market_size": "市场规模",
-      "confidence": "high 或 medium 或 low"
-    }}
-  ]
-}}"""
+    payload = {
+        "message": prompt,
+        "enableWebSearch": True,
+    }
 
-    try:
-        ai_text = await call_secondme_chat(
-            current_user.access_token,
-            prompt,
-            enable_web_search=True,
-        )
-    except Exception as e:
-        raise HTTPException(502, f"SecondMe 调用失败: {str(e)[:300]}")
+    # 流式代理：一边读 SecondMe SSE，一边把进度发给前端
+    async def stream_discover():
+        full_text = ""
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0, connect=15.0),
+                follow_redirects=True,
+            ) as client:
+                async with client.stream(
+                    "POST", url, json=payload,
+                    headers={
+                        "Authorization": f"Bearer {current_user.access_token}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                ) as response:
+                    if response.status_code != 200:
+                        error = await response.aread()
+                        yield f"data: {json.dumps({'type':'error','content':f'SecondMe {response.status_code}: {error.decode()[:200]}'})}\n\n"
+                        return
 
-    if not ai_text:
-        raise HTTPException(502, "SecondMe 未返回内容，请确认已授权 chat 权限")
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line or line.startswith("event:"):
+                            continue
+                        if line.startswith("data:"):
+                            data_str = line[len("data:"):].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                content = data.get("content", "")
+                                if not content:
+                                    for c in data.get("choices", []):
+                                        delta = c.get("delta", {})
+                                        if delta.get("content"):
+                                            content = delta["content"]
+                                if content:
+                                    full_text += content
+                                    # 发送进度给前端
+                                    yield f"data: {json.dumps({'type':'progress','content':content})}\n\n"
+                            except json.JSONDecodeError:
+                                continue
 
-    logger.info(f"SecondMe raw ({len(ai_text)} chars): {ai_text[:500]}...")
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','content':str(e)[:200]})}\n\n"
+            return
 
-    parsed = parse_json_from_text(ai_text)
+        # 解析 JSON
+        if full_text:
+            parsed = parse_json_from_text(full_text)
+            if parsed.get("needs"):
+                yield f"data: {json.dumps({'type':'result','data':parsed}, ensure_ascii=False)}\n\n"
+            else:
+                yield f"data: {json.dumps({'type':'raw','content':full_text[:1500]}, ensure_ascii=False)}\n\n"
+        else:
+            yield f"data: {json.dumps({'type':'error','content':'SecondMe 未返回内容'})}\n\n"
 
-    if not parsed.get("needs"):
-        # 不 fallback，返回原始回复让用户看到
-        return {
-            "analysis": f"SecondMe 回复了但无法解析为 JSON。原始回复：\n\n{ai_text[:800]}",
-            "needs": [{
-                "title": "⚠️ 解析失败 - 请重试",
-                "pain_point": ai_text[:100],
-                "target_users": "both",
-                "product_type": "human_web",
-                "market_size": "N/A",
-                "confidence": "low",
-            }],
-        }
+        yield f"data: {json.dumps({'type':'done'})}\n\n"
 
-    return parsed
+    return StreamingResponse(
+        stream_discover(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ==================== Step 1.5: 从需求创建项目 ====================
