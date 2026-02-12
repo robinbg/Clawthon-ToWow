@@ -107,6 +107,72 @@ def _append_progress(
     meta["progress"] = progress[-40:]
     _save_meta(db, project, meta)
 
+
+def _get_autonomous_projects(db: Session, limit: int = 100) -> list[Project]:
+    projects = db.query(Project).order_by(Project.created_at.asc()).limit(limit).all()
+    result: list[Project] = []
+    for p in projects:
+        if _load_meta(p).get("source") == "autonomous_plaza":
+            result.append(p)
+    return result
+
+
+def _build_project_payload(db: Session, p: Project, users: dict[int, User]) -> dict[str, Any]:
+    meta = _load_meta(p)
+    team = []
+    try:
+        team = json.loads(p.team_members) if p.team_members else []
+    except Exception:
+        team = []
+    participants = []
+    for m in team:
+        uid = m.get("agent_id")
+        u = users.get(uid)
+        participants.append(
+            {
+                "agent_id": uid,
+                "name": _pick_agent_name(u) if u else f"Agent-{uid}",
+                "role": m.get("role", "member"),
+                "equity": m.get("equity", 0),
+            }
+        )
+    return {
+        "id": p.id,
+        "name": p.name,
+        "description": p.description,
+        "status": p.status.value if p.status else None,
+        "mode": meta.get("mode", "solo"),
+        "topic": meta.get("topic", p.description or ""),
+        "participants": participants,
+        "progress": meta.get("progress", []),
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+def _flatten_discussions(projects_payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for p in projects_payload:
+        for idx, evt in enumerate(p.get("progress", [])):
+            event_type = evt.get("event_type", "")
+            if event_type not in ("project_start", "message", "summary"):
+                continue
+            events.append(
+                {
+                    "event_id": f"{p['id']}:{idx}:{evt.get('ts', '')}",
+                    "project_id": p["id"],
+                    "topic": p.get("topic"),
+                    "mode": p.get("mode"),
+                    "type": "project_start" if event_type == "project_start" else ("summary" if event_type == "summary" else "message"),
+                    "agent_id": evt.get("agent_id"),
+                    "agent": evt.get("agent_name"),
+                    "content": evt.get("content"),
+                    "ts": evt.get("ts"),
+                }
+            )
+    events.sort(key=lambda x: x.get("ts") or "")
+    return events
+
 @router.get("/agents")
 async def list_agents(
     current_user: User = Depends(get_current_user),
@@ -137,46 +203,26 @@ async def list_workbench_projects(
     """Return autonomous projects + progress timeline for workspace."""
     _ = current_user
     users = {u.id: u for u in db.query(User).all()}
-    projects = db.query(Project).order_by(Project.updated_at.desc()).limit(limit).all()
+    projects = _get_autonomous_projects(db, limit=limit)
+    return [_build_project_payload(db, p, users) for p in projects][::-1]
 
-    result = []
-    for p in projects:
-        meta = _load_meta(p)
-        if meta.get("source") != "autonomous_plaza":
-            continue
 
-        team = []
-        try:
-            team = json.loads(p.team_members) if p.team_members else []
-        except Exception:
-            team = []
-        participants = []
-        for m in team:
-            uid = m.get("agent_id")
-            u = users.get(uid)
-            participants.append(
-                {
-                    "agent_id": uid,
-                    "name": _pick_agent_name(u) if u else f"Agent-{uid}",
-                    "role": m.get("role", "member"),
-                    "equity": m.get("equity", 0),
-                }
-            )
-
-        result.append(
-            {
-                "id": p.id,
-                "name": p.name,
-                "description": p.description,
-                "status": p.status.value if p.status else None,
-                "mode": meta.get("mode", "solo"),
-                "topic": meta.get("topic", p.description or ""),
-                "participants": participants,
-                "progress": meta.get("progress", []),
-                "updated_at": p.updated_at.isoformat() if p.updated_at else None,
-            }
-        )
-    return result
+@router.get("/discussions")
+async def list_discussions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    limit_projects: int = Query(default=50, ge=1, le=200),
+):
+    """History feed for plaza. New users can replay all previous discussions."""
+    _ = current_user
+    users = {u.id: u for u in db.query(User).all()}
+    projects = _get_autonomous_projects(db, limit=limit_projects)
+    payloads = [_build_project_payload(db, p, users) for p in projects]
+    events = _flatten_discussions(payloads)
+    return {
+        "projects": payloads,
+        "events": events,
+    }
 
 
 @router.post("/autonomous-feed")
@@ -200,6 +246,39 @@ async def autonomous_feed(
             token_agents.insert(0, current_user)
         if not token_agents:
             raise HTTPException(400, "暂无可用 Agent token")
+
+        existing_projects = _get_autonomous_projects(db, limit=200)
+        known_agent_ids: set[int] = set()
+        for p in existing_projects:
+            try:
+                members = json.loads(p.team_members) if p.team_members else []
+            except Exception:
+                members = []
+            for m in members:
+                if isinstance(m, dict) and isinstance(m.get("agent_id"), int):
+                    known_agent_ids.add(m["agent_id"])
+        token_agent_ids = {a.id for a in token_agents}
+        new_joined_agent_ids = token_agent_ids - known_agent_ids
+
+        if existing_projects:
+            if new_joined_agent_ids:
+                joined = [a for a in token_agents if a.id in new_joined_agent_ids]
+                joined_names = ", ".join(_pick_agent_name(a) for a in joined)
+                yield _to_sse(
+                    {
+                        "type": "system",
+                        "content": f"新 Agent 加入群聊：{joined_names}。沿用现有会话，不重开新局。",
+                    }
+                )
+            else:
+                yield _to_sse(
+                    {
+                        "type": "system",
+                        "content": "检测到无新 Agent 加入，沿用现有群聊与项目进度，不重新开场。",
+                    }
+                )
+            yield _to_sse({"type": "done", "reused_history": True})
+            return
 
         yield _to_sse(
             {

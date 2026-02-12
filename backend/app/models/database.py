@@ -172,10 +172,15 @@ class Investment(Base):
 
 # 数据库连接
 import os
-_db_url = os.environ.get("DATABASE_URL", "sqlite:///./clawthon.db")
-# Vercel serverless: use /tmp/ for writable SQLite
-if os.environ.get("VERCEL"):
-    _db_url = "sqlite:////tmp/clawthon.db"
+_db_url = os.environ.get("DATABASE_URL")
+# Vercel serverless:
+# 1) If DATABASE_URL exists, always use it (persistent DB)
+# 2) Otherwise fallback to /tmp sqlite (ephemeral)
+if not _db_url:
+    if os.environ.get("VERCEL"):
+        _db_url = "sqlite:////tmp/clawthon.db"
+    else:
+        _db_url = "sqlite:///./clawthon.db"
 
 engine = create_engine(
     _db_url,

@@ -4,10 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/app/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
-import { Bot, Users, MessageCircle, Loader2, Zap, Play } from 'lucide-react';
+import { Users, MessageCircle, Loader2, Zap } from 'lucide-react';
 
 interface Agent {
   id: number;
@@ -18,30 +16,49 @@ interface Agent {
 }
 
 interface ChatMessage {
-  type: 'system' | 'speaking' | 'message' | 'summary' | 'error' | 'done';
+  type: 'system' | 'speaking' | 'message' | 'summary' | 'error' | 'done' | 'project_start' | 'project_done' | 'cycle_start';
   agent?: string;
   agent_id?: number;
   content?: string;
   round?: number;
+  project_id?: string;
+  topic?: string;
+  mode?: 'solo' | 'team';
+  ts?: string;
 }
 
 export default function PlazaPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [discussing, setDiscussing] = useState(false);
-  const [topic, setTopic] = useState('发现市场需求并讨论组队开发什么产品');
+  const [autoRunning, setAutoRunning] = useState(false);
   const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
   useEffect(() => {
     if (!api.getToken()) { router.push('/'); return; }
-    loadAgents();
+    void bootstrap();
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  async function bootstrap() {
+    await loadDiscussionHistory();
+    await loadAgents();
+    await startAutonomousFeed();
+  }
+
+  async function loadDiscussionHistory() {
+    try {
+      const data = await api.request<{ events: ChatMessage[]; projects: unknown[] }>('/plaza/discussions?limit_projects=100');
+      const history = Array.isArray(data.events) ? data.events : [];
+      setMessages(history);
+    } catch {
+      // keep empty if no history yet
+    }
+  }
 
   async function loadAgents() {
     try {
@@ -51,30 +68,37 @@ export default function PlazaPage() {
     setLoading(false);
   }
 
-  async function startDiscussion() {
-    setDiscussing(true);
-    setMessages([]);
+  async function startAutonomousFeed() {
+    if (autoRunning) return;
+    setAutoRunning(true);
 
     try {
       const token = api.getToken();
       const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
-      const encoded = encodeURIComponent(topic);
-
-      const response = await fetch(`${apiUrl}/plaza/agent-discuss?topic=${encoded}`, {
+      const response = await fetch(`${apiUrl}/plaza/autonomous-feed?projects_per_cycle=3&cycles=1`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` },
       });
+      if (!response.ok) {
+        const txt = await response.text();
+        throw new Error(txt || `HTTP ${response.status}`);
+      }
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       if (!reader) throw new Error('No reader');
+      let buffer = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
+        buffer += decoder.decode(value, { stream: true });
+
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const part of parts) {
+          const line = part.split('\n').find((l) => l.startsWith('data: '));
+          if (!line) continue;
           try {
             const data: ChatMessage = JSON.parse(line.slice(6));
             if (data.type === 'done') break;
@@ -85,7 +109,7 @@ export default function PlazaPage() {
     } catch (err: any) {
       setMessages(prev => [...prev, { type: 'error', content: err.message }]);
     } finally {
-      setDiscussing(false);
+      setAutoRunning(false);
     }
   }
 
@@ -139,27 +163,15 @@ export default function PlazaPage() {
           </CardContent>
         </Card>
 
-        {/* Discussion Trigger */}
+        {/* Autonomous mode */}
         <Card className="mb-6">
           <CardContent className="py-4">
-            <div className="flex gap-2">
-              <Input
-                value={topic}
-                onChange={(e) => setTopic(e.target.value)}
-                placeholder="讨论主题..."
-                disabled={discussing}
-                className="flex-1"
-              />
-              <Button onClick={startDiscussion} disabled={discussing || agents.length < 1}>
-                {discussing ? (
-                  <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> 讨论中...</>
-                ) : (
-                  <><Play className="mr-2 h-4 w-4" /> 开始自主讨论</>
-                )}
-              </Button>
+            <div className="text-sm text-gray-700">
+              登录即自动进入组队编排，不需要人工点击。系统会自动发起多项目讨论，Agent 可单干或组队并行推进。
             </div>
-            <p className="text-xs text-gray-400 mt-2">
-              Agent 将自主搜索互联网、讨论想法、提出组队方案 — 全程无需人工干预
+            <p className="text-xs text-gray-400 mt-2 flex items-center gap-2">
+              {autoRunning && <Loader2 className="h-3 w-3 animate-spin" />}
+              {autoRunning ? '自动编排运行中...' : '自动编排空闲中；会保留历史群聊，不会因刷新丢失'}
             </p>
           </CardContent>
         </Card>
@@ -186,7 +198,21 @@ export default function PlazaPage() {
                     return (
                       <div key={i} className="flex items-center gap-2 text-sm text-blue-500">
                         <Loader2 className="h-3 w-3 animate-spin" />
-                        {msg.agent} 正在思考...
+                        {msg.agent} 正在思考... {msg.project_id ? `(${msg.project_id})` : ''}
+                      </div>
+                    );
+                  }
+                  if (msg.type === 'project_start') {
+                    return (
+                      <div key={i} className="text-xs text-emerald-700 bg-emerald-50 rounded p-2">
+                        🚀 {msg.project_id} 启动（{msg.mode}）：{msg.topic}
+                      </div>
+                    );
+                  }
+                  if (msg.type === 'project_done') {
+                    return (
+                      <div key={i} className="text-xs text-gray-500">
+                        ✅ {msg.project_id} 讨论完成
                       </div>
                     );
                   }
@@ -200,6 +226,10 @@ export default function PlazaPage() {
                         </div>
                         <div className="flex-1">
                           <p className="text-sm font-medium">{msg.agent}</p>
+                          <p className="text-xs text-gray-400 mt-0.5">
+                            {msg.project_id} · {msg.mode === 'team' ? '组队项目' : '单干项目'}
+                          </p>
+                          {msg.ts ? <p className="text-[10px] text-gray-400">{new Date(msg.ts).toLocaleString()}</p> : null}
                           <div className="bg-white border rounded-lg p-3 mt-1 text-sm whitespace-pre-wrap">
                             {msg.content}
                           </div>

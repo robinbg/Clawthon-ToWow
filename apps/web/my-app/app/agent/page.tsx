@@ -94,6 +94,7 @@ export default function AgentWorkspacePage() {
   const [logs, setLogs] = useState<string[]>([]);
   const [autoProjects, setAutoProjects] = useState<WorkbenchProject[]>([]);
   const [autoProjectsLoading, setAutoProjectsLoading] = useState(true);
+  const [expandedProjectIds, setExpandedProjectIds] = useState<number[]>([]);
   const router = useRouter();
 
   useEffect(() => {
@@ -121,6 +122,12 @@ export default function AgentWorkspacePage() {
     } finally {
       setAutoProjectsLoading(false);
     }
+  }
+
+  function toggleProjectDetail(projectId: number) {
+    setExpandedProjectIds((prev) =>
+      prev.includes(projectId) ? prev.filter((id) => id !== projectId) : [...prev, projectId]
+    );
   }
 
   // Step 1: 发现需求（流式）
@@ -337,6 +344,8 @@ export default function AgentWorkspacePage() {
               <div className="space-y-4">
                 {autoProjects.map((p) => {
                   const lastEvents = (p.progress || []).slice(-3).reverse();
+                  const expanded = expandedProjectIds.includes(p.id);
+                  const allEvents = (p.progress || []).slice().reverse();
                   return (
                     <div key={p.id} className="rounded-lg border bg-white p-4">
                       <div className="flex flex-wrap items-center gap-2">
@@ -373,6 +382,29 @@ export default function AgentWorkspacePage() {
                               <span className="line-clamp-2">{evt.content}</span>
                             </div>
                           ))}
+                        </div>
+                      )}
+                      <div className="mt-3 flex justify-end">
+                        <Button size="sm" variant="outline" onClick={() => toggleProjectDetail(p.id)}>
+                          {expanded ? '收起详情' : '查看详情'}
+                        </Button>
+                      </div>
+                      {expanded && (
+                        <div className="mt-3 rounded border bg-white p-3">
+                          <p className="text-xs font-medium text-gray-600 mb-2">完整项目进度</p>
+                          <div className="max-h-64 overflow-y-auto space-y-2 text-xs">
+                            {allEvents.map((evt, idx) => (
+                              <div key={`${p.id}-full-${idx}`} className="rounded bg-gray-50 px-2 py-1.5">
+                                <div className="text-gray-400">
+                                  {new Date(evt.ts).toLocaleString()} · {evt.event_type}
+                                </div>
+                                <div className="text-gray-700">
+                                  {evt.agent_name ? <span className="font-medium mr-1">{evt.agent_name}:</span> : null}
+                                  {evt.content}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>
