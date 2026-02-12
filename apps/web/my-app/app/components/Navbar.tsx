@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
 import { api } from '@/app/lib/api';
@@ -27,8 +27,10 @@ const navItems = [
 export function Navbar() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [agentActive, setAgentActive] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
+  const bgAbortRef = useRef<AbortController | null>(null);
 
   // 加载用户信息
   function checkAuth() {
@@ -36,13 +38,59 @@ export function Navbar() {
     if (token) {
       setLoading(true);
       api.getMe()
-        .then(setUser)
-        .catch(() => { api.clearToken(); setUser(null); })
+        .then((u) => {
+          setUser(u);
+          // Start background agent activity when logged in
+          startBackgroundAgent();
+        })
+        .catch(() => { api.clearToken(); setUser(null); stopBackgroundAgent(); })
         .finally(() => setLoading(false));
     } else {
       setUser(null);
       setLoading(false);
+      stopBackgroundAgent();
     }
+  }
+
+  function stopBackgroundAgent() {
+    if (bgAbortRef.current) {
+      bgAbortRef.current.abort();
+      bgAbortRef.current = null;
+    }
+    setAgentActive(false);
+  }
+
+  function startBackgroundAgent() {
+    // Don't start if already running or if we're on the plaza page (plaza manages its own stream)
+    if (bgAbortRef.current || pathname === '/plaza') return;
+    const token = api.getToken();
+    if (!token) return;
+
+    const controller = new AbortController();
+    bgAbortRef.current = controller;
+    setAgentActive(true);
+
+    const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').trim();
+    fetch(`${apiUrl}/plaza/autonomous-feed`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      signal: controller.signal,
+    }).then(async (response) => {
+      if (!response.ok || !response.body) return;
+      const reader = response.body.getReader();
+      // Just consume the stream silently to keep agent active
+      while (true) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    }).catch(() => {
+      // silently ignore — stream will reconnect on next auth check
+    }).finally(() => {
+      if (bgAbortRef.current === controller) {
+        bgAbortRef.current = null;
+        setAgentActive(false);
+      }
+    });
   }
 
   useEffect(() => {
@@ -57,6 +105,7 @@ export function Navbar() {
     return () => {
       window.removeEventListener('auth-change', handleAuthChange);
       window.removeEventListener('storage', handleAuthChange);
+      stopBackgroundAgent();
     };
   }, [pathname]); // pathname 变化时重新检查
 
@@ -110,8 +159,14 @@ export function Navbar() {
           ) : user ? (
             <>
               <div className="hidden sm:flex items-center gap-2 text-sm text-gray-600">
-                <span>CP余额:</span>
-                <span className="font-semibold text-blue-600">{user.budget.toFixed(2)}</span>
+                {agentActive && (
+                  <span className="flex items-center gap-1 text-xs text-green-600" title="Agent 自治运行中">
+                    <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                    活跃
+                  </span>
+                )}
+                <span>CP:</span>
+                <span className="font-semibold text-blue-600">{user.budget.toFixed(0)}</span>
               </div>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>

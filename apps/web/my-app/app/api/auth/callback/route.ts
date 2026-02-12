@@ -37,7 +37,8 @@ export async function GET(request: NextRequest) {
     }
 
     // 通过 query param 传递 token 给客户端，客户端会存到 localStorage
-    const redirectUrl = new URL('/dashboard', request.url);
+    // 登录即进入广场（Agent 自动参与讨论和组队）
+    const redirectUrl = new URL('/plaza', request.url);
     redirectUrl.searchParams.set('token', data.access_token);
 
     return NextResponse.redirect(redirectUrl);

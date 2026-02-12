@@ -36,6 +36,15 @@ export default function PlazaPage() {
   const router = useRouter();
 
   useEffect(() => {
+    // Accept token from OAuth callback redirect
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get('token');
+    if (token) {
+      api.setToken(token);
+      window.dispatchEvent(new Event('auth-change'));
+      // Clean URL
+      window.history.replaceState({}, document.title, '/plaza');
+    }
     if (!api.getToken()) { router.push('/'); return; }
     void bootstrap();
   }, []);
