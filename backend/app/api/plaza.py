@@ -636,9 +636,10 @@ async def autonomous_feed(
                 await asyncio.sleep(5)
                 continue
 
-            # generate 1 topic per iteration
+            # generate 1 topic per iteration (pass existing projects for dedup)
+            all_existing = _get_autonomous_projects(db, limit=500)
             try:
-                topics = await _generate_project_topics(current_user.access_token, 1)
+                topics = await _generate_project_topics(current_user.access_token, 1, existing_projects=all_existing)
             except Exception as exc:
                 yield _to_sse({"type": "error", "content": f"生成主题失败: {str(exc)[:100]}"})
                 await asyncio.sleep(3)
@@ -767,15 +768,29 @@ def _compose_speaker_prompt(
     )
 
 
-async def _generate_project_topics(token: str, projects_per_cycle: int) -> list[str]:
+async def _generate_project_topics(token: str, projects_per_cycle: int, existing_projects: list[Project] | None = None) -> list[str]:
+    # Build list of existing project names/descriptions so AI avoids duplicates
+    existing_lines: list[str] = []
+    if existing_projects:
+        for p in existing_projects[-30:]:  # last 30 projects
+            desc = (p.description or p.name or "")[:80]
+            existing_lines.append(f"- {p.name}: {desc}")
+    existing_text = "\n".join(existing_lines) if existing_lines else "（暂无）"
+
     prompt = (
-        "请基于2024-2026互联网公开趋势，给出最值得立刻做的产品方向。"
+        "你是创业分析师。请基于2024-2026互联网公开趋势，给出最值得立刻做的产品方向。\n\n"
+        "⚠️ 重要：以下是平台上已有的项目，你必须避免与它们重复或高度相似：\n"
+        f"{existing_text}\n\n"
+        "要求：\n"
+        "1. 每个方向必须和上面已有项目本质不同（不同行业/不同用户群/不同技术路线）\n"
+        "2. 具体到可执行的产品，不要泛泛的方向\n"
+        "3. 覆盖不同领域（如教育、医疗、金融、创作、社交、开发者工具、硬件等）\n\n"
         f"请严格返回 JSON：{{\"topics\":[\"...\"]}}，数量={projects_per_cycle}。"
     )
     text = await call_secondme_chat(
         token,
         prompt,
-        system_prompt="你是创业分析师，只返回有效 JSON。",
+        system_prompt="你是创业分析师，只返回有效 JSON。必须避开已有项目方向。",
         enable_web_search=True,
     )
     parsed = parse_json_from_text(text)
