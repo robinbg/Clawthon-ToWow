@@ -1,3 +1,8 @@
+import json
+import logging
+import os
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -7,6 +12,69 @@ from typing import Optional
 from ..models.database import get_db, User
 from ..services.auth_service import AuthService, UserService
 from ..schemas.schemas import UserResponse, UserSettings, UserUpdate
+
+logger = logging.getLogger(__name__)
+
+# ---- Agent Registry (survives across Vercel cold starts within same instance) ----
+_REGISTRY_PATH = Path("/tmp/agents_registry.json") if os.environ.get("VERCEL") else Path("agents_registry.json")
+
+
+def _save_to_registry(user: User) -> None:
+    """Persist agent info to a JSON file so other cold-start requests can rebuild them."""
+    try:
+        registry: dict = {}
+        if _REGISTRY_PATH.exists():
+            registry = json.loads(_REGISTRY_PATH.read_text())
+        registry[str(user.secondme_id)] = {
+            "secondme_id": user.secondme_id,
+            "name": user.name,
+            "email": user.email,
+            "avatar": user.avatar,
+            "access_token": user.access_token,
+            "budget": user.budget,
+            "total_earned": user.total_earned,
+            "total_spent": user.total_spent,
+        }
+        _REGISTRY_PATH.write_text(json.dumps(registry, ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f"Failed to save agent registry: {e}")
+
+
+def rebuild_all_agents_from_registry(db: Session) -> int:
+    """Rebuild all known agents into DB from the registry file. Returns count of rebuilt agents."""
+    if not _REGISTRY_PATH.exists():
+        return 0
+    try:
+        registry = json.loads(_REGISTRY_PATH.read_text())
+    except Exception:
+        return 0
+    count = 0
+    for sid, info in registry.items():
+        existing = db.query(User).filter(User.secondme_id == sid).first()
+        if not existing:
+            u = User(
+                secondme_id=sid,
+                name=info.get("name") or f"Agent-{sid[:8]}",
+                email=info.get("email") or None,
+                avatar=info.get("avatar"),
+                access_token=info.get("access_token", ""),
+                budget=info.get("budget", 1000.0),
+                total_earned=info.get("total_earned", 0.0),
+                total_spent=info.get("total_spent", 0.0),
+            )
+            db.add(u)
+            count += 1
+        else:
+            # Update token if newer
+            new_token = info.get("access_token", "")
+            if new_token and new_token != existing.access_token:
+                existing.access_token = new_token
+    if count > 0:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+    return count
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 security = HTTPBearer()
@@ -68,6 +136,9 @@ async def get_current_user(
         except Exception:
             db.rollback()
 
+    # Persist to registry so other cold-start instances can rebuild this agent
+    _save_to_registry(user)
+
     return user
 
 
@@ -125,6 +196,9 @@ async def oauth_callback(request: OAuthCallbackRequest, db: Session = Depends(ge
 
     # 4. 创建或更新用户
     user = UserService.get_or_create_user(db, secondme_user, tokens)
+
+    # Persist to registry immediately on login
+    _save_to_registry(user)
 
     # 5. 创建应用内的JWT（嵌入用户信息，应对 Vercel serverless 临时 DB）
     access_token = AuthService.create_access_token(

@@ -24,7 +24,7 @@ from ..models.database import (
 )
 from ..services.project_service import ProjectService
 from .ai import call_secondme_chat, parse_json_from_text
-from .auth import get_current_user
+from .auth import get_current_user, rebuild_all_agents_from_registry
 
 router = APIRouter(prefix="/plaza", tags=["Agent Plaza"])
 logger = logging.getLogger(__name__)
@@ -523,6 +523,7 @@ async def list_agents(
     db: Session = Depends(get_db),
 ):
     """All logged-in SecondMe users are considered active participants."""
+    rebuild_all_agents_from_registry(db)
     agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
     return [
         {
@@ -585,6 +586,11 @@ async def autonomous_feed(
     async def stream():
         project_seq = 0
 
+        # Rebuild all known agents from registry (survives Vercel cold starts)
+        rebuilt = rebuild_all_agents_from_registry(db)
+        if rebuilt > 0:
+            logger.info(f"Rebuilt {rebuilt} agents from registry")
+
         # ---- initial: govern existing projects first ----
         existing_projects = _get_autonomous_projects(db, limit=500)
         project_seq = len(existing_projects)
@@ -619,7 +625,8 @@ async def autonomous_feed(
             if await request.is_disconnected():
                 return
 
-            # refresh agent list each round
+            # refresh agent list each round (rebuild from registry in case of cold start)
+            rebuild_all_agents_from_registry(db)
             all_agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
             token_agents = [a for a in all_agents if a.access_token]
             if not any(a.id == current_user.id for a in token_agents):
