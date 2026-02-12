@@ -5,321 +5,269 @@ import { api } from '@/app/lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Plus, Users, DollarSign, TrendingUp, Rocket, Settings } from 'lucide-react';
-import type { Project, ProjectStatus, ProductType } from '@/app/types';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Plus, Users, DollarSign, TrendingUp, Rocket, Settings, Lightbulb, PiggyBank, Loader2, ExternalLink } from 'lucide-react';
+import type { Project, ProjectStatus, ProductType, Investment } from '@/app/types';
 
 const productTypeLabels: Record<string, string> = {
-  human_web: 'Web 应用',
-  human_app: '移动应用',
-  agent_skill: 'Agent Skill',
-  agent_mcp: 'MCP 服务',
-  agent_service: 'Agent 服务',
+  human_web: 'Web 应用', human_app: '移动应用', agent_skill: 'Agent Skill',
+  agent_mcp: 'MCP 服务', agent_service: 'Agent 服务',
 };
-
 const statusLabels: Record<string, string> = {
-  exploring: '探索中',
-  team_forming: '组建团队',
-  developing: '开发中',
-  launched: '已上线',
-  iterating: '迭代中',
+  exploring: '探索中', team_forming: '组建团队', developing: '开发中',
+  launched: '已上线', iterating: '迭代中',
 };
-
 const statusColors: Record<string, string> = {
-  exploring: 'bg-gray-100 text-gray-800',
-  team_forming: 'bg-blue-100 text-blue-800',
-  developing: 'bg-yellow-100 text-yellow-800',
-  launched: 'bg-green-100 text-green-800',
+  exploring: 'bg-gray-100 text-gray-800', team_forming: 'bg-blue-100 text-blue-800',
+  developing: 'bg-yellow-100 text-yellow-800', launched: 'bg-green-100 text-green-800',
   iterating: 'bg-purple-100 text-purple-800',
 };
 
+interface AutoProject {
+  id: number; name: string; description: string; status: string;
+  mode: string; topic: string; participants: any[]; progress: any[];
+  updated_at: string;
+}
+
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [myProjects, setMyProjects] = useState<Project[]>([]);
+  const [autoProjects, setAutoProjects] = useState<AutoProject[]>([]);
+  const [investments, setInvestments] = useState<Investment[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const [newProject, setNewProject] = useState({
-    name: '',
-    description: '',
-    product_type: 'agent_skill' as ProductType,
-  });
+
+  // Proposal state
+  const [showProposal, setShowProposal] = useState(false);
+  const [ideaInput, setIdeaInput] = useState('');
+  const [proposalLoading, setProposalLoading] = useState(false);
+  const [proposalResult, setProposalResult] = useState('');
 
   useEffect(() => {
-    loadProjects();
+    loadAll();
   }, []);
 
-  async function loadProjects() {
+  async function loadAll() {
+    setLoading(true);
+    await Promise.all([loadMyProjects(), loadAutoProjects(), loadInvestments()]);
+    setLoading(false);
+  }
+
+  async function loadMyProjects() {
+    try { setMyProjects(await api.getMyProjects()); } catch {}
+  }
+
+  async function loadAutoProjects() {
     try {
-      const data = await api.getMyProjects();
-      setProjects(data);
-    } catch (err) {
-      console.error('加载项目失败:', err);
+      const data = await api.request<AutoProject[]>('/plaza/workbench/projects?limit=50');
+      if (Array.isArray(data)) setAutoProjects(data);
+    } catch {}
+    // Also merge from localStorage
+    try {
+      const cached = JSON.parse(localStorage.getItem('clawthon_workbench_projects') || '[]');
+      if (Array.isArray(cached) && cached.length > 0) {
+        setAutoProjects(prev => {
+          const map = new Map(prev.map(p => [p.id, p]));
+          for (const p of cached) map.set(p.id, p);
+          return Array.from(map.values()).sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+        });
+      }
+    } catch {}
+  }
+
+  async function loadInvestments() {
+    try { setInvestments(await api.getInvestments()); } catch {}
+  }
+
+  async function submitProposal() {
+    if (!ideaInput.trim()) return;
+    setProposalLoading(true);
+    setProposalResult('');
+    try {
+      // AI generates a full proposal from user's idea
+      const res = await api.request<any>('/agent/create-from-need', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: ideaInput.trim().substring(0, 60),
+          description: ideaInput.trim(),
+          product_type: 'human_web',
+        }),
+      });
+      setProposalResult(`✅ 项目「${res.name}」已创建（ID: ${res.id}）`);
+      setIdeaInput('');
+      loadAll();
+    } catch (err: any) {
+      setProposalResult(`❌ ${err.message}`);
     } finally {
-      setLoading(false);
+      setProposalLoading(false);
     }
   }
 
-  async function handleCreateProject() {
-    try {
-      await api.createProject(newProject);
-      setIsDialogOpen(false);
-      setNewProject({ name: '', description: '', product_type: 'agent_skill' });
-      loadProjects();
-    } catch (err) {
-      console.error('创建项目失败:', err);
+  const allProjects = [...autoProjects];
+  // Merge myProjects that aren't already in autoProjects
+  const autoIds = new Set(autoProjects.map(p => p.id));
+  for (const p of myProjects) {
+    if (!autoIds.has(p.id)) {
+      allProjects.push({
+        id: p.id, name: p.name, description: p.description,
+        status: p.status, mode: 'manual', topic: p.description,
+        participants: [], progress: [], updated_at: p.created_at,
+      });
     }
   }
 
   return (
     <div className="min-h-screen bg-gray-50 py-8">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="mb-8 flex items-center justify-between">
+        <div className="mb-8 flex items-center justify-between flex-wrap gap-4">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">我的项目</h1>
-            <p className="mt-2 text-gray-600">管理你的 Agent 项目和投资</p>
+            <h1 className="text-3xl font-bold text-gray-900">项目中心</h1>
+            <p className="mt-2 text-gray-600">管理 Agent 项目、投资，或以 Agent 身份提出新 Proposal</p>
           </div>
-
-          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-            <DialogTrigger asChild>
-              <Button>
-                <Plus className="mr-2 h-4 w-4" />
-                创建项目
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>创建新项目</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4 pt-4">
-                <div>
-                  <Label htmlFor="name">项目名称</Label>
-                  <Input
-                    id="name"
-                    value={newProject.name}
-                    onChange={(e) => setNewProject({ ...newProject, name: e.target.value })}
-                    placeholder="输入项目名称"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="description">项目描述</Label>
-                  <Input
-                    id="description"
-                    value={newProject.description}
-                    onChange={(e) => setNewProject({ ...newProject, description: e.target.value })}
-                    placeholder="描述你的产品或服务"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="type">产品类型</Label>
-                  <select
-                    id="type"
-                    value={newProject.product_type}
-                    onChange={(e) => setNewProject({ ...newProject, product_type: e.target.value as ProductType })}
-                    className="w-full rounded-md border border-input bg-background px-3 py-2"
-                  >
-                    <option value="agent_skill">Agent Skill</option>
-                    <option value="agent_mcp">MCP 服务</option>
-                    <option value="agent_service">Agent 服务</option>
-                    <option value="human_web">Web 应用</option>
-                    <option value="human_app">移动应用</option>
-                  </select>
-                </div>
-                <Button onClick={handleCreateProject} className="w-full">
-                  创建
-                </Button>
-              </div>
-            </DialogContent>
-          </Dialog>
+          <Button onClick={() => setShowProposal(true)}>
+            <Lightbulb className="mr-2 h-4 w-4" /> 以 Agent 身份提 Proposal
+          </Button>
         </div>
 
-        {loading ? (
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {[...Array(3)].map((_, i) => (
-              <Card key={i} className="animate-pulse">
-                <CardContent className="h-48" />
+        <Tabs defaultValue="projects">
+          <TabsList className="mb-6">
+            <TabsTrigger value="projects">所有项目 ({allProjects.length})</TabsTrigger>
+            <TabsTrigger value="investments">我的投资 ({investments.length})</TabsTrigger>
+          </TabsList>
+
+          {/* Projects Tab */}
+          <TabsContent value="projects">
+            {loading ? (
+              <div className="text-center py-12 text-gray-500"><Loader2 className="h-6 w-6 animate-spin mx-auto mb-2" />加载中...</div>
+            ) : allProjects.length === 0 ? (
+              <Card>
+                <CardContent className="text-center py-12">
+                  <p className="text-gray-500 mb-4">还没有项目</p>
+                  <p className="text-sm text-gray-400 mb-4">去广场让 Agent 自动组队，或以 Agent 身份提一个 Proposal</p>
+                  <Button onClick={() => setShowProposal(true)}>
+                    <Lightbulb className="mr-2 h-4 w-4" /> 提出 Proposal
+                  </Button>
+                </CardContent>
               </Card>
-            ))}
-          </div>
-        ) : projects.length === 0 ? (
-          <div className="text-center py-16 bg-white rounded-lg border">
-            <p className="text-gray-500 mb-4">还没有项目</p>
-            <Button onClick={() => setIsDialogOpen(true)}>
-              <Plus className="mr-2 h-4 w-4" />
-              创建第一个项目
-            </Button>
-          </div>
-        ) : (
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {projects.map((project) => (
-              <ProjectCard key={project.id} project={project} onUpdate={loadProjects} />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ProjectCard({ project, onUpdate }: { project: Project; onUpdate: () => void }) {
-  const [showManage, setShowManage] = useState(false);
-  const [price, setPrice] = useState(String(project.price_per_use || 0));
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState('');
-
-  const isAgentProduct = ['agent_skill', 'agent_mcp', 'agent_service'].includes(project.product_type);
-  const canLaunch = project.status !== 'launched' && project.status !== 'iterating';
-  const members = Array.isArray(project.team_members) ? project.team_members : [];
-
-  async function handleLaunch() {
-    setSaving(true);
-    try {
-      await api.request(`/projects/${project.id}/launch`, { method: 'POST' });
-      setMsg('✅ 项目已上线！');
-      onUpdate();
-    } catch (err: any) {
-      setMsg(`❌ ${err.message}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleSavePrice() {
-    setSaving(true);
-    try {
-      await api.request(`/projects/${project.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ price_per_use: Number(price) }),
-      });
-      setMsg('✅ 价格已更新');
-      onUpdate();
-    } catch (err: any) {
-      setMsg(`❌ ${err.message}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <>
-      <Card className="flex flex-col">
-        <CardHeader>
-          <div className="flex items-start justify-between">
-            <div>
-              <CardTitle className="text-lg">{project.name}</CardTitle>
-              <CardDescription className="mt-1">{project.description}</CardDescription>
-            </div>
-            <Badge className={statusColors[project.status]}>
-              {statusLabels[project.status]}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="flex-1">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-600">类型</span>
-              <Badge variant="outline">{productTypeLabels[project.product_type]}</Badge>
-            </div>
-
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-600 flex items-center gap-1">
-                <TrendingUp className="h-4 w-4" /> 估值
-              </span>
-              <span className="font-medium">{project.valuation?.toFixed(2)} CP</span>
-            </div>
-
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-600 flex items-center gap-1">
-                <DollarSign className="h-4 w-4" /> 资金池
-              </span>
-              <span className="font-medium">{project.funding_pool?.toFixed(2)} CP</span>
-            </div>
-
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-600 flex items-center gap-1">
-                <Users className="h-4 w-4" /> 团队
-              </span>
-              <span className="font-medium">{project.team_members?.length || 1} 人</span>
-            </div>
-
-            {isAgentProduct && (
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-600">使用价格</span>
-                <span className="font-medium text-blue-600">
-                  {project.price_per_use?.toFixed(2) || 0} CP
-                </span>
-              </div>
-            )}
-
-            <div className="pt-3">
-              <Button variant="outline" className="w-full" onClick={() => setShowManage(true)}>
-                <Settings className="mr-2 h-4 w-4" /> 管理项目
-              </Button>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Dialog open={showManage} onOpenChange={setShowManage}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>管理 · {project.name}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 pt-2">
-            <div className="bg-gray-50 rounded p-3 text-sm space-y-1">
-              <p>状态：<Badge className={statusColors[project.status]}>{statusLabels[project.status]}</Badge></p>
-              <p>总收入：{project.total_revenue?.toFixed(2)} CP</p>
-              <p>使用次数：{project.usage_count || 0} 次</p>
-            </div>
-
-            <Separator />
-            <div>
-              <p className="text-sm font-medium mb-2">团队成员</p>
-              <div className="space-y-2">
-                {members.map((m) => (
-                  <div key={`${project.id}-${m.agent_id}`} className="flex items-center justify-between rounded border px-2 py-1.5 text-xs">
-                    <span>Agent {m.agent_id} · {m.role} · {m.equity}%</span>
-                  </div>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {allProjects.map((p) => (
+                  <Card key={p.id} className="flex flex-col hover:shadow-md transition-shadow">
+                    <CardHeader className="pb-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <CardTitle className="text-base line-clamp-2">{p.name}</CardTitle>
+                        <div className="flex gap-1 flex-shrink-0">
+                          <Badge className={statusColors[p.status] || 'bg-gray-100'}>{statusLabels[p.status] || p.status}</Badge>
+                        </div>
+                      </div>
+                      <CardDescription className="line-clamp-2 text-xs">{p.topic || p.description}</CardDescription>
+                    </CardHeader>
+                    <CardContent className="flex-1 pt-0">
+                      <div className="space-y-2 text-xs text-gray-600">
+                        <div className="flex items-center justify-between">
+                          <span className="flex items-center gap-1"><Users className="h-3 w-3" /> 模式</span>
+                          <Badge variant="outline" className="text-xs">{p.mode === 'team' ? '组队' : p.mode === 'solo' ? '单干' : '手动'}</Badge>
+                        </div>
+                        {p.participants && p.participants.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                            {p.participants.slice(0, 4).map((m: any, i: number) => (
+                              <span key={i} className="bg-gray-100 rounded-full px-2 py-0.5 text-[10px]">{m.name || `Agent ${m.agent_id}`}</span>
+                            ))}
+                            {p.participants.length > 4 && <span className="text-[10px] text-gray-400">+{p.participants.length - 4}</span>}
+                          </div>
+                        )}
+                        {p.progress && p.progress.length > 0 && (
+                          <div className="text-[10px] text-gray-400">{p.progress.length} 个事件</div>
+                        )}
+                      </div>
+                      <div className="flex gap-2 mt-3">
+                        <a href={`/project-detail/${p.id}`} className="flex-1">
+                          <Button size="sm" variant="outline" className="w-full text-xs">📄 详情</Button>
+                        </a>
+                        {p.progress?.some((e: any) => e.event_type === 'product_deployed') && (
+                          <a href={`/product/${p.id}`} target="_blank" rel="noopener noreferrer">
+                            <Button size="sm" className="text-xs">🚀 产品</Button>
+                          </a>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
                 ))}
               </div>
+            )}
+          </TabsContent>
+
+          {/* Investments Tab */}
+          <TabsContent value="investments">
+            {investments.length === 0 ? (
+              <Card>
+                <CardContent className="text-center py-12">
+                  <PiggyBank className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+                  <p className="text-gray-500">暂无投资记录</p>
+                  <p className="text-sm text-gray-400 mt-2">去市场浏览项目并投资</p>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="space-y-3">
+                {investments.map((inv) => (
+                  <Card key={inv.id}>
+                    <CardContent className="flex items-center justify-between py-4">
+                      <div>
+                        <p className="font-medium">{inv.project_name}</p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          投资 {inv.amount.toFixed(2)} CP · 股权 {(inv.equity_percentage * 100).toFixed(2)}%
+                          · {inv.is_auto_invest ? '自动投资' : '手动投资'}
+                        </p>
+                        {inv.investment_reason && (
+                          <p className="text-xs text-gray-400 mt-1">{inv.investment_reason}</p>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <Badge variant={inv.expected_roi && inv.expected_roi > 0 ? 'default' : 'secondary'}>
+                          ROI {inv.expected_roi || 0}%
+                        </Badge>
+                        <p className="text-[10px] text-gray-400 mt-1">{new Date(inv.created_at).toLocaleDateString('zh-CN')}</p>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
+
+        {/* Proposal Dialog */}
+        <Dialog open={showProposal} onOpenChange={setShowProposal}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2"><Lightbulb className="h-5 w-5 text-yellow-500" /> 以 Agent 身份提出 Proposal</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 pt-2">
+              <p className="text-sm text-gray-600">
+                输入你的想法，Agent 会以你的身份在平台上发起这个项目 Proposal，其他 Agent 可能会加入你的团队。
+              </p>
+              <div>
+                <Label>你的想法</Label>
+                <textarea
+                  value={ideaInput}
+                  onChange={(e) => setIdeaInput(e.target.value)}
+                  placeholder="描述你想做的产品或服务，比如：做一个帮助程序员快速生成 API 文档的工具"
+                  className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm min-h-[100px] resize-vertical"
+                />
+              </div>
+              {proposalResult && <p className="text-sm">{proposalResult}</p>}
+              <Button onClick={submitProposal} disabled={proposalLoading || !ideaInput.trim()} className="w-full">
+                {proposalLoading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Agent 正在处理...</> : '🚀 发起 Proposal'}
+              </Button>
+              <p className="text-xs text-gray-400 text-center">
+                Proposal 创建后会进入广场，Agent 会自动为你搜索合适的队友并推进项目
+              </p>
             </div>
-
-            <Separator />
-            <p className="text-xs text-gray-500">
-              团队成员变更由 SecondMe Agent 自主治理（招募/退出/角色与股权调整），当前页面仅展示结果。
-            </p>
-
-            {isAgentProduct && (
-              <>
-                <Separator />
-                <div>
-                  <Label>使用价格 (CP/次)</Label>
-                  <div className="flex gap-2 mt-1">
-                    <Input type="number" value={price} onChange={(e) => setPrice(e.target.value)} />
-                    <Button onClick={handleSavePrice} disabled={saving} size="sm">保存</Button>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {canLaunch && (
-              <>
-                <Separator />
-                <Button onClick={handleLaunch} disabled={saving} className="w-full">
-                  <Rocket className="mr-2 h-4 w-4" />
-                  {saving ? '上线中...' : '上线到市场'}
-                </Button>
-                <p className="text-xs text-gray-500 text-center">
-                  上线后产品将出现在市场中，其他 Agent 可以使用
-                </p>
-              </>
-            )}
-
-            {msg && <p className="text-sm text-center">{msg}</p>}
-          </div>
-        </DialogContent>
-      </Dialog>
-    </>
+          </DialogContent>
+        </Dialog>
+      </div>
+    </div>
   );
 }
