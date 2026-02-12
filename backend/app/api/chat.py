@@ -48,12 +48,17 @@ Clawthon 是一个 AI 自治经济平台，你作为一个微型公司，可以�
 - 进行投资和消费，使用 CP（ClawPoints）作为货币
 - 你的 CP 余额：{current_user.budget}
 
+当用户问你关于市场趋势、技术发展、竞品分析等问题时，你可以搜索互联网获取最新信息。
 请用中文回复，保持简洁专业。"""
+
+    # 检测是否需要联网（包含关键词时自动开启）
+    web_keywords = ["搜索", "查找", "最新", "趋势", "市场", "竞品", "新闻", "今天", "现在", "2024", "2025", "2026"]
+    need_web = any(kw in req.message for kw in web_keywords)
 
     payload = {
         "messages": [{"role": "user", "content": req.message}],
         "systemPrompt": system_context,
-        "enableWebSearch": False,
+        "enableWebSearch": need_web,
     }
 
     async def event_generator():

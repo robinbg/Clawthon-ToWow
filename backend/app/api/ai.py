@@ -43,21 +43,31 @@ class AIInvestDecision(BaseModel):
     recommended_action: str
 
 
-async def call_secondme_chat(access_token: str, prompt: str) -> str:
+async def call_secondme_chat(
+    access_token: str,
+    prompt: str,
+    enable_web_search: bool = False,
+    system_prompt: str = "",
+) -> str:
     """
-    调用 SecondMe Chat Stream API，收集完整回复
+    调用 SecondMe Chat Stream API，收集完整回复。
+    enable_web_search=True 时 Agent 会真实搜索互联网。
     """
     api_base = settings.SECONDME_API_BASE.strip()
     url = f"{api_base}/gate/lab/api/secondme/chat/stream"
 
-    payload = {
-        "message": prompt,
-        "enableWebSearch": False,
+    payload: dict = {
+        "messages": [{"role": "user", "content": prompt}],
+        "enableWebSearch": enable_web_search,
     }
+    if system_prompt:
+        payload["systemPrompt"] = system_prompt
+
+    logger.info(f"SecondMe chat: web_search={enable_web_search}, prompt={prompt[:80]}...")
 
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0, connect=15.0),
+            timeout=httpx.Timeout(120.0, connect=15.0),
             follow_redirects=True,
         ) as client:
             full_text = ""
@@ -73,7 +83,7 @@ async def call_secondme_chat(access_token: str, prompt: str) -> str:
             ) as response:
                 if response.status_code != 200:
                     error_body = await response.aread()
-                    logger.error(f"SecondMe chat error: {response.status_code} {error_body[:300]}")
+                    logger.error(f"SecondMe chat error: {response.status_code} {error_body[:500]}")
                     return ""
 
                 async for line in response.aiter_lines():
@@ -86,18 +96,18 @@ async def call_secondme_chat(access_token: str, prompt: str) -> str:
                             break
                         try:
                             data = json.loads(data_str)
+                            # 兼容多种 SSE 返回格式
                             content = data.get("content", "")
                             if content:
                                 full_text += content
-                            # 兼容 choices 格式
-                            choices = data.get("choices", [])
-                            for c in choices:
+                            for c in data.get("choices", []):
                                 delta = c.get("delta", {})
                                 if delta.get("content"):
                                     full_text += delta["content"]
                         except json.JSONDecodeError:
                             continue
 
+            logger.info(f"SecondMe chat reply length: {len(full_text)}")
             return full_text.strip()
 
     except Exception as e:

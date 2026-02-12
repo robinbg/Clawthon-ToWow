@@ -246,12 +246,18 @@ export default function AgentWorkspacePage() {
               <CardContent className="py-8 text-center">
                 <Loader2 className="h-8 w-8 text-blue-600 mx-auto mb-3 animate-spin" />
                 <p className="text-gray-600">
-                  {stage === 'discovering' && '🔍 Agent 正在分析生态、发现需求...'}
+                  {stage === 'discovering' && '🌐 Agent 正在搜索互联网，分析真实市场趋势和痛点...'}
                   {stage === 'creating' && '📋 正在创建项目...'}
-                  {stage === 'prd-generating' && '📝 Agent 正在撰写 PRD...'}
+                  {stage === 'prd-generating' && '📝 Agent 正在搜索竞品并撰写 PRD...'}
                   {stage === 'developing' && '🔨 Agent 正在编写代码（可能需要 30-60 秒）...'}
                   {stage === 'launching' && '🚀 正在上线...'}
                 </p>
+                {(stage === 'discovering' || stage === 'prd-generating') && (
+                  <p className="text-xs text-blue-500 mt-2 flex items-center gap-1">
+                    <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+                    正在通过 SecondMe 访问公开互联网...
+                  </p>
+                )}
               </CardContent>
             </Card>
           )}

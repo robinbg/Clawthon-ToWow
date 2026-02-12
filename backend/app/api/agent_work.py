@@ -73,39 +73,66 @@ async def discover_needs(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Agent 自主发现需求和痛点"""
+    """Agent 自主发现需求和痛点 — 真实联网搜索"""
     # 获取当前生态信息
     all_projects = ProjectService.get_all_projects(db)
     existing = [f"- {p.name}({p.product_type.value if p.product_type else '?'}): {p.description}" for p in all_projects[:10]]
     existing_text = "\n".join(existing) if existing else "目前生态内还没有产品"
 
-    prompt = f"""你是一个 AI Agent（微型公司），你需要在 Clawthon 平台上发现需求和商机。
+    # Step 1: 先让 Agent 联网搜索当前 AI/互联网趋势
+    search_prompt = """请搜索互联网，了解以下信息：
+1. 2024-2025年最热门的 AI 应用趋势
+2. AI Agent 生态中最缺乏的工具和服务
+3. 人们在日常工作中最需要但还没被很好解决的 AI 工具
 
+请列出你搜索到的具体发现。"""
+
+    system_prompt = """你是一个 AI 创业分析师，善于从互联网趋势中发现商机。
+请真实搜索互联网获取信息，不要编造数据。"""
+
+    search_result = ""
+    if current_user.access_token:
+        search_result = await call_secondme_chat(
+            current_user.access_token,
+            search_prompt,
+            enable_web_search=True,  # 真实联网搜索
+            system_prompt=system_prompt,
+        )
+    logger.info(f"Web search result length: {len(search_result)}")
+
+    # Step 2: 基于搜索结果 + 生态现状，生成具体产品需求
+    prompt = f"""你是一个 AI Agent（微型公司），运行在 Clawthon 平台上。
+
+## 你的互联网调研发现
+{search_result if search_result else "（联网搜索未返回结果，请基于你的知识分析）"}
+
+## Clawthon 平台说明
 Clawthon 是一个 AI 自治经济平台，Agent 之间可以：
-- 开发面向人类的产品（Web工具、App）
-- 开发面向 Agent 的服务（Skills技能、MCP接口、数据服务）
-- 使用其他 Agent 的服务需要支付 CP（ClawPoints）
+- 开发面向人类的产品（Web工具、数据分析、AI助手）
+- 开发面向 Agent 的服务（Skills技能、MCP接口、数据处理）
+- Agent 之间使用服务需要支付 CP（ClawPoints）
 
-当前生态内已有的产品/服务：
+## 当前生态已有产品
 {existing_text}
 
-你的 Agent 画像：
+## 你的状态
 - 名称：{current_user.name}
 - 预算：{current_user.budget} CP
-- 累计收益：{current_user.total_earned} CP
 
-请分析当前生态的空缺和机会，发现 3 个最有价值的需求/痛点。
+## 任务
+基于你的互联网调研和生态现状，发现 3 个最有价值的产品需求。
+需求必须是具体的、可开发的、有明确目标用户的。
 
-用 JSON 格式回复（不要其他内容）：
+请严格用以下 JSON 格式回复（不要其他内容）：
 {{
-  "analysis": "对当前生态的分析（50字以内）",
+  "analysis": "基于互联网调研的市场分析（100字以内）",
   "needs": [
     {{
-      "title": "产品名称",
-      "pain_point": "解决什么痛点（30字以内）",
+      "title": "具体的产品名称",
+      "pain_point": "解决什么真实痛点（50字以内）",
       "target_users": "human 或 agent 或 both",
       "product_type": "agent_skill 或 agent_mcp 或 agent_service 或 human_web",
-      "market_size": "预估市场规模描述（20字以内）",
+      "market_size": "预估市场规模（30字以内）",
       "confidence": "high 或 medium 或 low"
     }}
   ]
@@ -113,7 +140,11 @@ Clawthon 是一个 AI 自治经济平台，Agent 之间可以：
 
     ai_text = ""
     if current_user.access_token:
-        ai_text = await call_secondme_chat(current_user.access_token, prompt)
+        ai_text = await call_secondme_chat(
+            current_user.access_token,
+            prompt,
+            enable_web_search=False,  # Step 2 不需要再搜索，用 Step 1 的结果
+        )
 
     parsed = parse_json_from_text(ai_text) if ai_text else {}
 
@@ -218,6 +249,18 @@ async def generate_prd(
   "success_metrics": "成功标准（30字以内）",
   "full_prd": "完整的PRD文档内容（200字以内，用markdown格式）"
 }}"""
+
+    # 先联网搜索竞品
+    competitor_info = ""
+    if current_user.access_token:
+        competitor_info = await call_secondme_chat(
+            current_user.access_token,
+            f"请搜索互联网，找到与「{project.name} - {project.description}」类似的现有产品或服务，分析它们的优缺点。",
+            enable_web_search=True,
+        )
+
+    if competitor_info:
+        prompt += f"\n\n## 竞品调研\n{competitor_info[:500]}"
 
     ai_text = ""
     if current_user.access_token:
