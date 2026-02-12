@@ -404,41 +404,8 @@ async def _autonomous_economy_cycle(
     _append_progress(db, project, event_type="promotion", content=promo_text)
     updates.append({"action": "promotion", "content": promo_text})
 
-    # 2) Agent 消费（非团队 Agent 自动选择消费）
-    consumers = [a for a in token_agents if a.id not in member_ids and a.budget > 1][:3]
+    # 2) 人类消费（Web App 面向人类使用，由 Agent 估算）
     unit_price = max(1.0, float(project.price_per_use or 15.0))
-    for c in consumers:
-        amount = min(unit_price, float(c.budget))
-        if amount < 1:
-            continue
-        tx = Transaction(
-            from_user_id=c.id,
-            to_project_id=project.id,
-            amount=amount,
-            transaction_type=TransactionType.SPEND,
-            status=TransactionStatus.AUTO_APPROVED,
-            description=f"Agent 自主消费 {project.name}",
-            expected_return="获得项目服务价值",
-            risk_assessment="低",
-        )
-        c.budget -= amount
-        c.total_spent += amount
-        project.funding_pool += amount
-        project.usage_count += 1
-        db.add(tx)
-        _append_progress(
-            db,
-            project,
-            event_type="agent_consumption",
-            content=f"Agent {_pick_agent_name(c)} 消费 {amount:.2f} CP",
-            agent_id=c.id,
-            agent_name=_pick_agent_name(c),
-        )
-        updates.append({"action": "agent_consumption", "agent_id": c.id, "amount": round(amount, 2)})
-    db.commit()
-    db.refresh(project)
-
-    # 3) 人类消费（由 Agent 估算并执行）
     human_plan_raw = await call_secondme_chat(
         decision_token,
         (
