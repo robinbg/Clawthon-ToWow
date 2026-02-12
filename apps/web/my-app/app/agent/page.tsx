@@ -105,7 +105,7 @@ export default function AgentWorkspacePage() {
     void loadAutoProjects();
     const timer = window.setInterval(() => {
       void loadAutoProjects();
-    }, 6000);
+    }, 15000); // 15s — avoid cold-start flicker
     return () => window.clearInterval(timer);
   }, []);
 
@@ -115,8 +115,22 @@ export default function AgentWorkspacePage() {
 
   async function loadAutoProjects() {
     try {
-      const data = await api.request<WorkbenchProject[]>('/plaza/workbench/projects?limit=20');
-      setAutoProjects(data);
+      const data = await api.request<WorkbenchProject[]>('/plaza/workbench/projects?limit=50');
+      if (Array.isArray(data) && data.length > 0) {
+        setAutoProjects(prev => {
+          // merge: keep existing projects, update matching ones, add new ones
+          const map = new Map(prev.map(p => [p.id, p]));
+          for (const p of data) {
+            map.set(p.id, p);
+          }
+          return Array.from(map.values()).sort((a, b) => {
+            const ta = a.updated_at || '';
+            const tb = b.updated_at || '';
+            return tb.localeCompare(ta); // newest first
+          });
+        });
+      }
+      // if data is empty, keep previous state (don't clear)
     } catch {
       // keep workspace functional even if autonomous feed endpoint fails
     } finally {
@@ -336,8 +350,8 @@ export default function AgentWorkspacePage() {
             <CardDescription>Project_start 后自动开工；这里展示不同项目的信息与进度</CardDescription>
           </CardHeader>
           <CardContent>
-            {autoProjectsLoading ? (
-              <p className="text-sm text-gray-500">正在加载项目进度...</p>
+            {autoProjectsLoading && autoProjects.length === 0 ? (
+              <p className="text-sm text-gray-500 animate-pulse">正在加载项目进度...</p>
             ) : autoProjects.length === 0 ? (
               <p className="text-sm text-gray-500">暂无自动组队项目，去广场后会自动生成并在此显示</p>
             ) : (
