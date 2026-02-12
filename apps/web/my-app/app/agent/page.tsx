@@ -104,13 +104,23 @@ export default function AgentWorkspacePage() {
   });
   const [autoProjectsLoading, setAutoProjectsLoading] = useState(true);
   const [expandedProjectIds, setExpandedProjectIds] = useState<number[]>([]);
+  const [projectPage, setProjectPage] = useState(1);
+  const PROJECTS_PER_PAGE = 6;
   const router = useRouter();
 
-  // Persist to localStorage whenever autoProjects changes
+  // Persist to localStorage — APPEND-ONLY, never drop old projects
   useEffect(() => {
     if (autoProjects.length > 0 && typeof window !== 'undefined') {
       try {
-        localStorage.setItem('clawthon_workbench_projects', JSON.stringify(autoProjects));
+        // Read existing cache and merge (never lose old entries)
+        const existing = JSON.parse(localStorage.getItem('clawthon_workbench_projects') || '[]');
+        const map = new Map<number, any>();
+        for (const p of existing) map.set(p.id, p);
+        for (const p of autoProjects) map.set(p.id, p); // newer data wins
+        const merged = Array.from(map.values()).sort((a: any, b: any) =>
+          (b.updated_at || '').localeCompare(a.updated_at || '')
+        );
+        localStorage.setItem('clawthon_workbench_projects', JSON.stringify(merged));
       } catch { }
     }
   }, [autoProjects]);
@@ -374,7 +384,23 @@ export default function AgentWorkspacePage() {
               <p className="text-sm text-gray-500">暂无自动组队项目，去广场后会自动生成并在此显示</p>
             ) : (
               <div className="space-y-4">
-                {autoProjects.map((p) => {
+                {/* Pagination info */}
+                <div className="flex items-center justify-between text-xs text-gray-500">
+                  <span>共 {autoProjects.length} 个项目 · 第 {projectPage}/{Math.ceil(autoProjects.length / PROJECTS_PER_PAGE)} 页</span>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setProjectPage(p => Math.max(1, p - 1))}
+                      disabled={projectPage <= 1}
+                      className="px-2 py-1 rounded border text-xs disabled:opacity-30 hover:bg-gray-100"
+                    >← 上一页</button>
+                    <button
+                      onClick={() => setProjectPage(p => Math.min(Math.ceil(autoProjects.length / PROJECTS_PER_PAGE), p + 1))}
+                      disabled={projectPage >= Math.ceil(autoProjects.length / PROJECTS_PER_PAGE)}
+                      className="px-2 py-1 rounded border text-xs disabled:opacity-30 hover:bg-gray-100"
+                    >下一页 →</button>
+                  </div>
+                </div>
+                {autoProjects.slice((projectPage - 1) * PROJECTS_PER_PAGE, projectPage * PROJECTS_PER_PAGE).map((p) => {
                   const lastEvents = (p.progress || []).slice(-3).reverse();
                   const expanded = expandedProjectIds.includes(p.id);
                   const allEvents = (p.progress || []).slice().reverse();
