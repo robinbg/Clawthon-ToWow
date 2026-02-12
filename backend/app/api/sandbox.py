@@ -203,9 +203,6 @@ function run() {{
         code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
         code = _clean_code(code, "mcp_service")
 
-    code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
-    code = _clean_code(code, product_type)
-
     # Save to project DB
     project.product_code = code
     project.product_type_detail = product_type
