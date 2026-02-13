@@ -126,37 +126,95 @@ async def develop_product_code(
         if not code or "<html" not in cl or "<body" not in cl:
             code = _generate_fallback_mock_html(short_name, desc, [])
 
-    # ==================== Agent Skill ====================
+    # ==================== Agent Skill (Towow 标准格式) ====================
     elif product_type == "agent_skill":
-        prompt = (
-            f"为「{short_name}」写一个 Python 函数。描述：{desc}\n"
-            "要求：函数名 execute_skill，签名 def execute_skill(input_data: dict) -> dict\n"
-            "必须有真实处理逻辑，只用标准库，包含 try/except。\n"
-            "只输出 Python 代码。"
-        )
+        prompt = f"""为「{short_name}」开发一个 Agent Skill（参考 Towow 框架格式）。描述：{desc}
+
+请生成一个完整的 Python 模块，包含：
+
+1. 一个 Skill 类继承自基类，包含：
+   - name 属性（字符串）
+   - description 属性（描述这个 Skill 做什么）
+   - input_schema：dict 描述输入参数格式
+   - output_schema：dict 描述输出格式
+   - async def execute(self, context: dict) -> dict 方法（核心逻辑）
+
+2. 同时提供一个简单的 execute_skill(input_data: dict) -> dict 兼容函数
+
+示例结构：
+```python
+class {short_name.replace(' ','').replace('-','')}Skill:
+    name = "skill_name"
+    description = "技能描述"
+    input_schema = {{"text": "str", "options": "dict"}}
+    output_schema = {{"result": "str", "metadata": "dict"}}
+    
+    async def execute(self, context: dict) -> dict:
+        # 真实处理逻辑
+        ...
+
+# 兼容函数（沙盒调用用）
+def execute_skill(input_data: dict) -> dict:
+    import asyncio
+    skill = {short_name.replace(' ','').replace('-','')}Skill()
+    return asyncio.get_event_loop().run_until_complete(skill.execute(input_data))
+```
+
+要求：只用标准库，包含错误处理，有真实逻辑。只输出 Python 代码。"""
+
         for attempt in range(MAX_REACT_ROUNDS):
             raw = await call_secondme_chat(token, prompt, enable_web_search=False)
             code = _clean_code(raw, "agent_skill")
-            # Verify: try compiling + dry-run
             error = _verify_python_code(code, "execute_skill")
             if not error:
-                break  # ✅ valid
-            # Fix: feed error back
+                break
             prompt = (
                 f"你上次生成的代码有错误：{error}\n"
-                f"请修复并重新输出完整的 execute_skill 函数。\n"
+                f"请修复并重新输出完整代码（包含 Skill 类和 execute_skill 兼容函数）。\n"
                 f"项目：{short_name}，描述：{desc}\n"
                 "只输出 Python 代码。"
             )
 
-    # ==================== MCP Service ====================
+    # ==================== MCP Service (标准 MCP 格式) ====================
     else:
-        prompt = (
-            f"为「{short_name}」写一个 MCP 服务 Python 函数。描述：{desc}\n"
-            "要求：函数名 handle_request，签名 def handle_request(method: str, params: dict) -> dict\n"
-            "支持至少3个method，真实逻辑，只用标准库，包含错误处理。\n"
-            "只输出 Python 代码。"
-        )
+        prompt = f"""为「{short_name}」开发一个 MCP (Model Context Protocol) 兼容服务。描述：{desc}
+
+请生成一个完整的 Python 模块，包含：
+
+1. 一个 MCPService 类，包含：
+   - name 属性
+   - tools 列表：每个 tool 是 dict，包含 name/description/inputSchema
+   - async def call_tool(self, tool_name: str, arguments: dict) -> dict
+
+2. 同时提供一个 handle_request(method: str, params: dict) -> dict 兼容函数
+
+示例结构：
+```python
+class {short_name.replace(' ','').replace('-','')}MCP:
+    name = "service_name"
+    tools = [
+        {{
+            "name": "tool1",
+            "description": "工具1描述",
+            "inputSchema": {{"type": "object", "properties": {{"query": {{"type": "string"}}}}}}
+        }},
+        # ... more tools
+    ]
+    
+    async def call_tool(self, tool_name: str, arguments: dict) -> dict:
+        if tool_name == "tool1":
+            ...
+        return {{"error": "unknown tool"}}
+
+# 兼容函数（沙盒调用用）
+def handle_request(method: str, params: dict) -> dict:
+    import asyncio
+    svc = {short_name.replace(' ','').replace('-','')}MCP()
+    return asyncio.get_event_loop().run_until_complete(svc.call_tool(method, params))
+```
+
+要求：至少3个 tools，真实逻辑，只用标准库。只输出 Python 代码。"""
+
         for attempt in range(MAX_REACT_ROUNDS):
             raw = await call_secondme_chat(token, prompt, enable_web_search=False)
             code = _clean_code(raw, "mcp_service")
@@ -165,7 +223,7 @@ async def develop_product_code(
                 break
             prompt = (
                 f"你上次生成的代码有错误：{error}\n"
-                f"请修复并重新输出完整的 handle_request 函数。\n"
+                f"请修复并重新输出完整代码（包含 MCP 类和 handle_request 兼容函数）。\n"
                 f"项目：{short_name}，描述：{desc}\n"
                 "只输出 Python 代码。"
             )
