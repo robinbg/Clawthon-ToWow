@@ -71,21 +71,25 @@ async def develop_product_code(
     short_name = (project.name or "Product").replace("[Auto] ", "")[:40]
 
     # Step 1: Classify product type
-    # 分类：面向人类 = web_app，面向 Agent = mcp_service（Skills 就是 MCP Tools）
+    # 分类三种产品：
+    # - web_app：面向人类，浏览器使用
+    # - agent_skill：面向 Agent 的 Skills Layer（知识与逻辑层）—— "怎么做"
+    # - mcp_service：面向 Agent 的 MCP Tool Layer（连接与执行层）—— "能做什么"
     classify_raw = await call_secondme_chat(
         token,
-        f"判断项目「{short_name}」（描述：{desc}）面向谁。"
-        "如果面向人类用户在浏览器中使用，返回 web_app；"
-        "如果面向其他 AI Agent 提供能力/接口/服务，返回 mcp_service。"
-        '只返回 JSON：{"type":"web_app|mcp_service"}',
+        f"判断项目「{short_name}」（描述：{desc}）应该做成什么类型的产品。\n"
+        "三种选择：\n"
+        "- web_app：面向人类用户在浏览器中使用的 Web 应用\n"
+        "- agent_skill：面向 Agent 的业务技能（知识与逻辑层）—— 定义'怎么做'，包含业务流程编排、领域知识、工作流模板（如 code-review、data-analysis）\n"
+        "- mcp_service：面向 Agent 的 MCP 工具服务（连接与执行层）—— 定义'能做什么'，暴露标准化接口、访问外部数据和服务（如 API 网关、数据库连接）\n"
+        '只返回 JSON：{"type":"web_app|agent_skill|mcp_service"}',
         enable_web_search=False,
     )
     product_type = "web_app"
     try:
         pt = parse_json_from_text(classify_raw).get("type", "web_app")
         if pt in ("web_app", "mcp_service", "agent_skill"):
-            # agent_skill 统一归为 mcp_service（Skills = MCP Tools）
-            product_type = "mcp_service" if pt in ("mcp_service", "agent_skill") else "web_app"
+            product_type = pt
     except Exception:
         pass
 
@@ -127,9 +131,119 @@ async def develop_product_code(
         if not code or "<html" not in cl or "<body" not in cl:
             code = _generate_fallback_mock_html(short_name, desc, [])
 
-    # ==================== MCP Service / Agent Skill (统一为 MCP — Anthropic FastMCP) ====================
-    # 在 MCP 中，Skills = Tools。所有面向 Agent 的产品都是 MCP Server，暴露 Tools。
-    # 协议：JSON-RPC 2.0，发现用 tools/list，调用用 tools/call。
+    # ==================== Agent Skill（知识与逻辑层 — "怎么做"）====================
+    # Skills 定义业务流程、领域知识、工作流编排
+    # 格式：SKILL.md（指令文档）+ 工作流脚本 + 领域知识模板
+    elif product_type == "agent_skill":
+        prompt = f"""为「{short_name}」开发一个 Agent Skill（知识与逻辑层）。描述：{desc}
+
+Agent Skill 是业务技能包，告诉 Agent "怎么做"某件事。它包含：
+- 业务流程定义（步骤、判断逻辑、分支）
+- 领域知识和最佳实践
+- 工作流编排脚本
+
+请生成完整的 Skill 包代码：
+
+```python
+# === Agent Skill: {short_name} ===
+# 知识与逻辑层 —— 定义业务流程和领域知识
+
+SKILL_NAME = "skill_name"
+SKILL_DESCRIPTION = "技能描述"
+
+# 技能文档（SKILL.md 内容）
+SKILL_DOC = \"\"\"
+## 概述
+这个技能做什么
+
+## 适用场景
+- 场景1
+- 场景2
+
+## 工作流程
+1. 第一步：...
+2. 第二步：...
+3. 第三步：...
+
+## 输入格式
+- task: 任务描述 (str)
+- context: 上下文信息 (dict)
+
+## 输出格式
+- result: 处理结果 (str)
+- steps: 执行的步骤记录 (list)
+- recommendations: 建议 (list)
+
+## 领域知识
+- 知识点1
+- 知识点2
+
+## 最佳实践
+- 实践1
+- 实践2
+\"\"\"
+
+# 工作流步骤定义
+WORKFLOW_STEPS = [
+    {{"step": 1, "name": "理解任务", "action": "analyze_intent"}},
+    {{"step": 2, "name": "选择策略", "action": "select_strategy"}},
+    {{"step": 3, "name": "执行处理", "action": "execute"}},
+    {{"step": 4, "name": "验证结果", "action": "validate"}},
+]
+
+# 领域知识库
+DOMAIN_KNOWLEDGE = {{
+    "patterns": [...],
+    "rules": [...],
+    "best_practices": [...],
+}}
+
+def execute_skill(input_data: dict) -> dict:
+    \"\"\"执行技能的完整工作流\"\"\"
+    task = input_data.get("task", input_data.get("text", ""))
+    context = input_data.get("context", {{}})
+    
+    steps_log = []
+    result = ""
+    recommendations = []
+    
+    # Step 1: 理解任务意图
+    # ... 真实逻辑 ...
+    
+    # Step 2-N: 按工作流执行
+    # ... 真实逻辑 ...
+    
+    return {{
+        "skill": SKILL_NAME,
+        "result": result,
+        "steps": steps_log,
+        "recommendations": recommendations,
+    }}
+```
+
+要求：
+- SKILL_DOC 要详细，包含领域知识和最佳实践
+- WORKFLOW_STEPS 至少 4 步
+- execute_skill 必须按工作流真实执行每个步骤
+- 只用标准库，包含错误处理
+- 只输出 Python 代码"""
+
+        for attempt in range(MAX_REACT_ROUNDS):
+            raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+            code = _clean_code(raw, "agent_skill")
+            error = _verify_python_code(code, "execute_skill")
+            if not error:
+                break
+            prompt = (
+                f"你上次生成的代码有错误：{error}\n"
+                f"请修复并重新输出完整的 Agent Skill 代码。\n"
+                f"项目：{short_name}，描述：{desc}\n"
+                "只输出 Python 代码。"
+            )
+
+    # ==================== MCP Service（连接与执行层 — "能做什么"）====================
+    # MCP 暴露标准化工具接口，执行具体调用、访问外部数据
+    # 格式：FastMCP @mcp.tool() + JSON-RPC 2.0
     else:
         prompt = f"""为「{short_name}」开发一个 MCP Server（使用 Anthropic 官方 FastMCP SDK）。描述：{desc}
 
@@ -412,7 +526,9 @@ async def call_product(
     except Exception:
         pass
 
-    if product_type in ("agent_skill", "mcp_service"):
+    if product_type == "agent_skill":
+        return _execute_skill_sandbox_code(project_id, code, body)
+    elif product_type == "mcp_service":
         method = body.get("method", "")
         params = body.get("params", {})
         return _execute_mcp_sandbox_code(project_id, code, method, params)
