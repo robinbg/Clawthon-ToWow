@@ -126,148 +126,183 @@ async def develop_product_code(
         if not code or "<html" not in cl or "<body" not in cl:
             code = _generate_fallback_mock_html(short_name, desc, [])
 
-    # ==================== Agent Skill (MCP Tool 格式 — Anthropic 标准) ====================
-    # Skills = 单个 MCP Tool，这样 Agent 之间可以用统一协议互相调用
+    # ==================== Agent Skill (Anthropic Agent Skills 格式) ====================
+    # 官方格式：目录 + SKILL.md + scripts/ + templates/
+    # 我们生成一个 JSON 描述（包含 SKILL.md 内容 + 脚本代码），前端展示为结构化 Skill 包
     elif product_type == "agent_skill":
-        prompt = f"""为「{short_name}」开发一个 Agent Skill（遵循 Anthropic MCP Tool 格式）。描述：{desc}
+        prompt = f"""为「{short_name}」开发一个 Agent Skill（遵循 Anthropic Agent Skills 格式）。描述：{desc}
 
-一个 Skill 就是一个 MCP Tool。请生成完整 Python 模块：
+Anthropic Agent Skills 是文件系统上的目录，包含：
+- SKILL.md：指令文档，告诉 Claude 这个 Skill 做什么、怎么用
+- scripts/：可执行脚本（Claude 运行脚本，只看输出）
+- templates/：模板文件
 
-```python
-# === Skill 定义（MCP Tool 格式）===
-SKILL_NAME = "skill_name"
-SKILL_DESCRIPTION = "这个 Skill 做什么"
-SKILL_INPUT_SCHEMA = {{
-    "type": "object",
-    "properties": {{
-        "text": {{"type": "string", "description": "输入文本"}},
-        # ... 更多参数
-    }},
-    "required": ["text"]
-}}
-
-def _execute_impl(arguments: dict) -> dict:
-    \"\"\"Skill 核心逻辑（纯函数，不依赖外部包）\"\"\"
-    text = arguments.get("text", "")
-    # ... 真实处理逻辑 ...
-    return {{
-        "type": "text",
-        "text": "处理结果",
-        "metadata": {{}}  # 可选的元数据
+请生成一个完整的 Skill 包，用 JSON 格式输出（不要其他内容）：
+{{
+  "skill_name": "技能名称（英文下划线格式）",
+  "skill_description": "一句话描述",
+  "skill_md": "完整的 SKILL.md 内容（Markdown 格式），包含：\\n## 概述\\n## 使用场景\\n## 输入格式\\n## 输出格式\\n## 使用示例\\n## 注意事项",
+  "scripts": [
+    {{
+      "filename": "main.py",
+      "description": "核心处理脚本",
+      "code": "完整的 Python 脚本代码（接收命令行参数，输出结果到 stdout）"
     }}
-
-# === 沙盒兼容函数 ===
-def execute_skill(input_data: dict) -> dict:
-    return _execute_impl(input_data)
-
-# === MCP Tool 注册信息（供 MCP Server 使用）===
-MCP_TOOL = {{
-    "name": SKILL_NAME,
-    "description": SKILL_DESCRIPTION,
-    "inputSchema": SKILL_INPUT_SCHEMA
+  ],
+  "templates": [
+    {{
+      "filename": "output_template.md",
+      "content": "输出模板内容"
+    }}
+  ]
 }}
-```
 
 要求：
-- _execute_impl 必须有真实处理逻辑（不是 echo），至少 15 行
-- 只用 Python 标准库
-- 包含 try/except 错误处理
-- inputSchema 遵循 JSON Schema
-- 只输出 Python 代码"""
+- SKILL.md 要详细、有使用示例
+- 脚本用 Python 标准库，通过 sys.argv 或 stdin 接收输入
+- 脚本必须有真实处理逻辑（至少 20 行）
+- 只输出 JSON"""
 
+        raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+        skill_data = parse_json_from_text(raw)
+
+        # Build code that wraps the skill for sandbox execution
+        script_code = ""
+        if skill_data.get("scripts"):
+            script_code = skill_data["scripts"][0].get("code", "")
+        skill_md = skill_data.get("skill_md", f"# {short_name}\n\n{desc}")
+
+        # Generate a combined Python module for sandbox + a readable SKILL.md
+        code = f'''# === Anthropic Agent Skill: {skill_data.get("skill_name", short_name)} ===
+# 格式：目录结构 + SKILL.md + scripts/
+# 
+# {short_name}/
+# ├── SKILL.md
+# ├── scripts/
+# │   └── main.py
+# └── templates/
+#     └── output_template.md
+
+# ============ SKILL.md 内容 ============
+SKILL_MD = """{skill_md}"""
+
+# ============ 核心脚本 (scripts/main.py) ============
+SCRIPT_CODE = """{script_code}"""
+
+# ============ Skill 元数据 ============
+SKILL_NAME = "{skill_data.get("skill_name", "skill")}"
+SKILL_DESCRIPTION = "{skill_data.get("skill_description", desc[:80])}"
+
+# ============ 沙盒执行兼容函数 ============
+def execute_skill(input_data: dict) -> dict:
+    """在沙盒中执行 Skill 的核心逻辑"""
+    try:
+        # 模拟脚本执行环境
+        import io, sys
+        text = input_data.get("text", input_data.get("input", str(input_data)))
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        
+        # 注入输入变量并执行脚本
+        exec_globals = {{"__builtins__": __builtins__, "input_text": text, "input_data": input_data}}
+        exec(SCRIPT_CODE, exec_globals)
+        
+        output = sys.stdout.getvalue()
+        sys.stdout = old_stdout
+        
+        return {{"result": output.strip() if output.strip() else "执行完成", "skill": SKILL_NAME}}
+    except Exception as e:
+        return {{"error": str(e), "skill": SKILL_NAME}}
+'''
+        # Skip the normal prompt flow since we already built the code
+        pass  # code is already set
+
+        # Code-ReAct: verify execute_skill works
         for attempt in range(MAX_REACT_ROUNDS):
-            raw = await call_secondme_chat(token, prompt, enable_web_search=False)
-            code = _clean_code(raw, "agent_skill")
             error = _verify_python_code(code, "execute_skill")
             if not error:
                 break
-            prompt = (
-                f"你上次生成的代码有错误：{error}\n"
-                f"请修复并重新输出完整代码（包含 Skill 类和 execute_skill 兼容函数）。\n"
-                f"项目：{short_name}，描述：{desc}\n"
-                "只输出 Python 代码。"
+            # Re-generate script part only
+            fix_prompt = (
+                f"你上次生成的 Skill 脚本有错误：{error}\n"
+                f"请只输出修复后的 Python 脚本代码（不要 JSON 包装）。\n"
+                f"项目：{short_name}，描述：{desc}"
             )
+            raw = await call_secondme_chat(token, fix_prompt, enable_web_search=False)
+            fixed_script = _clean_code(raw, "agent_skill")
+            if fixed_script:
+                code = code.replace(script_code, fixed_script)
+                script_code = fixed_script
 
-    # ==================== MCP Service (Anthropic 官方 MCP Python SDK 格式) ====================
+    # ==================== MCP Service (Anthropic 官方 MCP Python SDK — FastMCP) ====================
     else:
-        prompt = f"""为「{short_name}」开发一个 MCP (Model Context Protocol) Server。描述：{desc}
+        prompt = f"""为「{short_name}」开发一个 MCP Server（使用 Anthropic 官方 FastMCP SDK）。描述：{desc}
 
-请按照 Anthropic 官方 MCP Python SDK 格式生成代码，包含：
+请按照 Anthropic 官方 MCP Python SDK（FastMCP）格式生成代码。
 
-1. 标准 MCP Server 定义（使用 mcp.server.Server 和装饰器）
-2. list_tools() 返回 Tool 列表，每个 Tool 有 name/description/inputSchema
-3. call_tool(name, arguments) 处理工具调用
-4. 同时提供一个 handle_request(method, params) -> dict 兼容函数（用于沙盒测试）
+FastMCP 是 Anthropic 推荐的 MCP Server 开发方式，核心是用 @mcp.tool() 装饰器注册工具。
 
-示例结构：
+请生成完整代码：
+
 ```python
-# === MCP Server 定义（Anthropic 官方格式）===
-# 需要 pip install mcp
+# === MCP Server（Anthropic FastMCP 格式）===
+# pip install mcp[cli]
+# 运行: python server.py 或 mcp dev server.py
 
-# from mcp.server import Server
-# from mcp.types import Tool, TextContent
+# from mcp.server.fastmcp import FastMCP
+# mcp = FastMCP("server_name")
+
+# @mcp.tool()
+# def tool1(query: str) -> str:
+#     \"\"\"工具1的描述\"\"\"
+#     return "结果"
+
+# @mcp.tool() 
+# def tool2(data: str, format: str = "json") -> str:
+#     \"\"\"工具2的描述\"\"\"
+#     return "结果"
+
+# if __name__ == "__main__":
+#     mcp.run(transport="stdio")
+
+# === 以下是不依赖 mcp 包的纯实现（用于沙盒执行）===
 
 SERVER_NAME = "service_name"
-TOOLS = [
-    {{
-        "name": "tool1",
-        "description": "工具1描述",
-        "inputSchema": {{
-            "type": "object",
-            "properties": {{
-                "query": {{"type": "string", "description": "查询内容"}}
-            }},
-            "required": ["query"]
-        }}
-    }},
-    {{
-        "name": "tool2",
-        "description": "工具2描述",
-        "inputSchema": {{
-            "type": "object",
-            "properties": {{
-                "data": {{"type": "string"}}
-            }}
-        }}
-    }}
-]
 
-def _call_tool_impl(name: str, arguments: dict) -> dict:
-    \"\"\"工具调用的核心实现（纯函数，不依赖 mcp 包）\"\"\"
-    if name == "tool1":
-        query = arguments.get("query", "")
-        # ... 真实处理逻辑 ...
-        return {{"type": "text", "text": "处理结果"}}
-    elif name == "tool2":
-        # ...
-        return {{"type": "text", "text": "结果"}}
-    return {{"type": "error", "text": f"Unknown tool: {{name}}"}}
+def tool1(query: str) -> str:
+    \"\"\"工具1描述\"\"\"
+    # 真实逻辑
+    return "结果"
 
-# === 沙盒兼容函数 ===
+def tool2(data: str, format: str = "json") -> str:
+    \"\"\"工具2描述\"\"\"
+    # 真实逻辑
+    return "结果"
+
+# 工具注册表
+TOOLS = {{
+    "tool1": tool1,
+    "tool2": tool2,
+}}
+
+# 沙盒兼容函数
 def handle_request(method: str, params: dict) -> dict:
-    \"\"\"兼容沙盒调用：method=tool名，params=arguments\"\"\"
-    return _call_tool_impl(method, params)
-
-# === 完整 MCP Server 启动代码（需要 mcp 包）===
-# def create_server():
-#     server = Server(SERVER_NAME)
-#     @server.list_tools()
-#     async def list_tools():
-#         from mcp.types import Tool
-#         return [Tool(**t) for t in TOOLS]
-#     @server.call_tool()
-#     async def call_tool(name: str, arguments: dict):
-#         from mcp.types import TextContent
-#         result = _call_tool_impl(name, arguments)
-#         return [TextContent(type="text", text=result.get("text", str(result)))]
-#     return server
+    if method not in TOOLS:
+        return {{"error": f"Unknown tool: {{method}}", "available": list(TOOLS.keys())}}
+    try:
+        result = TOOLS[method](**params)
+        return {{"result": result, "tool": method}}
+    except Exception as e:
+        return {{"error": str(e), "tool": method}}
 ```
 
 要求：
-- 至少3个 tools，每个有真实处理逻辑
-- _call_tool_impl 只用标准库
-- inputSchema 遵循 JSON Schema 格式
+- 至少3个 tool 函数，每个有 docstring 和真实逻辑
+- 函数签名用 Python 类型注解（FastMCP 自动推导 inputSchema）
+- 纯实现部分只用标准库
 - 包含错误处理
+- 顶部注释掉的是 FastMCP 版（可以 pip install mcp 后直接用）
+- 下方是不依赖 mcp 包的纯实现 + handle_request 兼容函数
 - 只输出 Python 代码"""
 
         for attempt in range(MAX_REACT_ROUNDS):
