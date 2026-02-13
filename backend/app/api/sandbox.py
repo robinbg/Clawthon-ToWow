@@ -175,45 +175,87 @@ def execute_skill(input_data: dict) -> dict:
                 "只输出 Python 代码。"
             )
 
-    # ==================== MCP Service (标准 MCP 格式) ====================
+    # ==================== MCP Service (Anthropic 官方 MCP Python SDK 格式) ====================
     else:
-        prompt = f"""为「{short_name}」开发一个 MCP (Model Context Protocol) 兼容服务。描述：{desc}
+        prompt = f"""为「{short_name}」开发一个 MCP (Model Context Protocol) Server。描述：{desc}
 
-请生成一个完整的 Python 模块，包含：
+请按照 Anthropic 官方 MCP Python SDK 格式生成代码，包含：
 
-1. 一个 MCPService 类，包含：
-   - name 属性
-   - tools 列表：每个 tool 是 dict，包含 name/description/inputSchema
-   - async def call_tool(self, tool_name: str, arguments: dict) -> dict
-
-2. 同时提供一个 handle_request(method: str, params: dict) -> dict 兼容函数
+1. 标准 MCP Server 定义（使用 mcp.server.Server 和装饰器）
+2. list_tools() 返回 Tool 列表，每个 Tool 有 name/description/inputSchema
+3. call_tool(name, arguments) 处理工具调用
+4. 同时提供一个 handle_request(method, params) -> dict 兼容函数（用于沙盒测试）
 
 示例结构：
 ```python
-class {short_name.replace(' ','').replace('-','')}MCP:
-    name = "service_name"
-    tools = [
-        {{
-            "name": "tool1",
-            "description": "工具1描述",
-            "inputSchema": {{"type": "object", "properties": {{"query": {{"type": "string"}}}}}}
-        }},
-        # ... more tools
-    ]
-    
-    async def call_tool(self, tool_name: str, arguments: dict) -> dict:
-        if tool_name == "tool1":
-            ...
-        return {{"error": "unknown tool"}}
+# === MCP Server 定义（Anthropic 官方格式）===
+# 需要 pip install mcp
 
-# 兼容函数（沙盒调用用）
+# from mcp.server import Server
+# from mcp.types import Tool, TextContent
+
+SERVER_NAME = "service_name"
+TOOLS = [
+    {{
+        "name": "tool1",
+        "description": "工具1描述",
+        "inputSchema": {{
+            "type": "object",
+            "properties": {{
+                "query": {{"type": "string", "description": "查询内容"}}
+            }},
+            "required": ["query"]
+        }}
+    }},
+    {{
+        "name": "tool2",
+        "description": "工具2描述",
+        "inputSchema": {{
+            "type": "object",
+            "properties": {{
+                "data": {{"type": "string"}}
+            }}
+        }}
+    }}
+]
+
+def _call_tool_impl(name: str, arguments: dict) -> dict:
+    \"\"\"工具调用的核心实现（纯函数，不依赖 mcp 包）\"\"\"
+    if name == "tool1":
+        query = arguments.get("query", "")
+        # ... 真实处理逻辑 ...
+        return {{"type": "text", "text": "处理结果"}}
+    elif name == "tool2":
+        # ...
+        return {{"type": "text", "text": "结果"}}
+    return {{"type": "error", "text": f"Unknown tool: {{name}}"}}
+
+# === 沙盒兼容函数 ===
 def handle_request(method: str, params: dict) -> dict:
-    import asyncio
-    svc = {short_name.replace(' ','').replace('-','')}MCP()
-    return asyncio.get_event_loop().run_until_complete(svc.call_tool(method, params))
+    \"\"\"兼容沙盒调用：method=tool名，params=arguments\"\"\"
+    return _call_tool_impl(method, params)
+
+# === 完整 MCP Server 启动代码（需要 mcp 包）===
+# def create_server():
+#     server = Server(SERVER_NAME)
+#     @server.list_tools()
+#     async def list_tools():
+#         from mcp.types import Tool
+#         return [Tool(**t) for t in TOOLS]
+#     @server.call_tool()
+#     async def call_tool(name: str, arguments: dict):
+#         from mcp.types import TextContent
+#         result = _call_tool_impl(name, arguments)
+#         return [TextContent(type="text", text=result.get("text", str(result)))]
+#     return server
 ```
 
-要求：至少3个 tools，真实逻辑，只用标准库。只输出 Python 代码。"""
+要求：
+- 至少3个 tools，每个有真实处理逻辑
+- _call_tool_impl 只用标准库
+- inputSchema 遵循 JSON Schema 格式
+- 包含错误处理
+- 只输出 Python 代码"""
 
         for attempt in range(MAX_REACT_ROUNDS):
             raw = await call_secondme_chat(token, prompt, enable_web_search=False)
