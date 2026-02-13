@@ -61,177 +61,114 @@ async def develop_product_code(
     project: Project,
     token: str,
 ) -> dict[str, Any]:
-    """Let Agent write real code for the project. Returns {product_type_detail, code, description}."""
-
-    # Decide what kind of product to build based on project description
-    # All products are web_app — the platform can only serve web applications
-    product_type = "web_app"
+    """
+    Code-ReAct: Generate → Verify → Fix → Retry.
+    Supports web_app, agent_skill, mcp_service.
+    """
+    from .ai import parse_json_from_text
 
     desc = (project.description or project.name or "工具")[:300]
     short_name = (project.name or "Product").replace("[Auto] ", "")[:40]
 
-    # Step 1: Let Agent assess feasibility — can this be fully implemented in pure client-side JS?
-    assess_prompt = f"""判断项目「{short_name}」能否用纯前端 JavaScript（无后端、无数据库、无 API 调用）完全实现核心功能。
-描述：{desc}
+    # Step 1: Classify product type
+    classify_raw = await call_secondme_chat(
+        token,
+        f"判断项目「{short_name}」（描述：{desc}）最适合做哪种产品。"
+        "如果面向人类用户用浏览器使用，返回 web_app；"
+        "如果是给其他 Agent 调用的能力接口，返回 agent_skill；"
+        "如果是标准化数据/工具 API 服务，返回 mcp_service。"
+        '只返回 JSON：{"type":"web_app|agent_skill|mcp_service"}',
+        enable_web_search=False,
+    )
+    product_type = "web_app"
+    try:
+        pt = parse_json_from_text(classify_raw).get("type", "web_app")
+        if pt in ("web_app", "agent_skill", "mcp_service"):
+            product_type = pt
+    except Exception:
+        pass
 
-只返回 JSON：
-{{"feasible": true或false, "reason": "一句话理由", "mock_features": ["如果不能完全实现，列出需要mock的功能"]}}"""
+    code = ""
+    MAX_REACT_ROUNDS = 2
 
-    from .ai import parse_json_from_text
-    assess_raw = await call_secondme_chat(token, assess_prompt, enable_web_search=False)
-    assess = parse_json_from_text(assess_raw)
-    is_feasible = assess.get("feasible", False)
-    mock_features = assess.get("mock_features", [])
+    # ==================== Web App ====================
+    if product_type == "web_app":
+        prompt = (
+            f"你是前端工程师。为「{short_name}」开发一个完整的单页 HTML 网站。\n"
+            f"描述：{desc}\n\n"
+            "严格要求：\n"
+            "- 输出完整 HTML（内联 CSS+JS），以 <!DOCTYPE html> 开头\n"
+            "- 必须包含导航栏、功能区域（卡片/表格/列表）、可交互按钮\n"
+            "- 如果核心功能需要后端，用 Mock 假数据代替，并标注黄色横幅'📋 Mock 演示'\n"
+            "- 现代设计（白底、蓝色主色、圆角、阴影）、响应式\n"
+            "- 底部：Powered by Clawthon AI Agent\n"
+            "- 不要引用外部 CDN\n"
+            "- 不要输出 Python 代码\n\n"
+            "只输出 HTML，不要解释。"
+        )
+        for attempt in range(MAX_REACT_ROUNDS):
+            raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+            code = _clean_code(raw, "web_app")
+            # Verify: must be valid HTML
+            cl = (code or "").lower()
+            if code and len(code) > 300 and "<html" in cl and "<body" in cl and "import " not in code[:100].lower():
+                break  # ✅ valid
+            # Fix: tell AI what went wrong
+            prompt = (
+                f"你上一次的输出不是有效的 HTML 页面（可能输出了 Python 代码或太短）。\n"
+                f"请重新为「{short_name}」生成一个完整的 HTML 网站。\n"
+                f"描述：{desc}\n"
+                "必须以 <!DOCTYPE html> 开头，包含 <html><head><body> 标签。\n"
+                "只输出 HTML 代码，不要 Python，不要解释。"
+            )
+        # Final fallback
+        cl = (code or "").lower()
+        if not code or "<html" not in cl or "<body" not in cl:
+            code = _generate_fallback_mock_html(short_name, desc, [])
 
-    if product_type == "web_app" and is_feasible:
-        # FULL implementation — ask for real JS logic
-        logic_prompt = f"""项目「{short_name}」可以用纯前端实现。描述：{desc}
-
-请返回 JSON（不要其他内容）：
-{{
-  "title": "产品名称（10字以内）",
-  "subtitle": "一句话描述（20字以内）",
-  "input_label": "输入框的提示文字",
-  "input_placeholder": "输入框 placeholder",
-  "button_text": "按钮文字（如：分析、生成、计算）",
-  "features": ["功能1名称", "功能2名称", "功能3名称"],
-  "js_process_function": "processInput(text)函数体，接收用户输入text，返回HTML结果字符串。必须有真实逻辑（字符串处理/计算/转换/分析），不少于15行JS代码。不能用fetch/XMLHttpRequest。"
-}}"""
-        logic_raw = await call_secondme_chat(token, logic_prompt, enable_web_search=False)
-        logic = parse_json_from_text(logic_raw)
-
-    elif product_type == "web_app":
-        # MOCK mode — Let SecondMe write a COMPLETE custom HTML page from scratch based on PRD
-        # No template — every product looks different
-        mock_prompt = f"""你是一个资深前端开发工程师。请根据以下产品需求，从零开发一个完整的 Mock 演示网站。
-
-产品名称：{short_name}
-产品描述：{desc}
-需要后端才能实现的功能（用 Mock 数据代替）：{', '.join(mock_features) if mock_features else '需要服务端支持的功能'}
-
-## 要求：
-1. 输出一个完整的 HTML 文件，包含内联 CSS 和 JS
-2. 这是一个 Mock 演示站——界面和交互流程要完整，但数据用预设的假数据
-3. 页面必须像一个真实产品的首页/主界面，包含：
-   - 顶部导航栏（产品名+几个菜单项）
-   - 产品 Hero 区域或核心功能展示
-   - 至少 2-3 个功能区域（用卡片/表格/列表展示 Mock 数据）
-   - 可交互元素（按钮点击弹出 mock 结果、Tab 切换、搜索过滤等）
-   - 底部信息栏
-4. 在页面某处用黄色横幅标注"📋 这是 Mock 演示 · 由 AI Agent 自动开发 · 完整功能需要后端支持"
-5. 底部显示 "Powered by Clawthon AI Agent"
-6. 设计要专业、现代（白色/浅灰底、蓝色主色调、圆角卡片、阴影）
-7. 不要引用外部 CDN，CSS/JS 全部内联
-8. 必须以 <!DOCTYPE html> 开头
-
-每个产品的页面布局和功能区域都应该不同——根据产品需求定制设计，不要用通用模板。
-
-只输出 HTML 代码，不要任何解释。"""
-
-        code = await call_secondme_chat(token, mock_prompt, enable_web_search=False)
-        code = _clean_code(code, "web_app")
-
-        # If SecondMe returned garbage, use a minimal fallback
-        if not code or len(code) < 200 or not code.strip().lower().startswith("<!doctype"):
-            code = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{short_name}</title></head>
-<body style="font-family:system-ui;max-width:700px;margin:40px auto;padding:20px">
-<h1>{short_name}</h1><p>{desc}</p>
-<div style="background:#fef3c7;padding:12px;border-radius:8px;margin:20px 0">📋 Mock 演示 · 由 AI Agent 开发</div>
-<p>产品开发中...</p>
-<footer style="margin-top:40px;color:#94a3b8;font-size:12px">Powered by Clawthon AI Agent</footer>
-</body></html>"""
-
-    # For feasible products, use the template approach
-    if is_feasible:
-        logic = parse_json_from_text(logic_raw) if 'logic_raw' in dir() else {}
-        title = logic.get("title", short_name)
-        subtitle = logic.get("subtitle", desc[:50])
-        input_label = logic.get("input_label", "请输入内容")
-        placeholder = logic.get("input_placeholder", "在此输入...")
-        btn_text = logic.get("button_text", "处理")
-        features = logic.get("features", ["功能1", "功能2", "功能3"])
-        features_html = "".join(f'<span style="background:#eff6ff;color:#2563eb;padding:4px 12px;border-radius:20px;font-size:13px">{f}</span>' for f in features[:5])
-        js_body = logic.get("js_process_function", "return '<p>处理完成：' + text.length + ' 个字符</p>';")
-
-        code = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title}</title>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;min-height:100vh;padding:20px}}
-.container{{max-width:700px;margin:0 auto}}
-.header{{text-align:center;padding:30px 0}}
-.header h1{{font-size:28px;color:#1e293b;margin-bottom:8px}}
-.header p{{color:#64748b;font-size:15px}}
-.features{{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:16px}}
-.card{{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08);padding:28px;margin-top:20px}}
-.card label{{display:block;font-weight:600;color:#334155;margin-bottom:10px;font-size:15px}}
-.card textarea{{width:100%;min-height:120px;border:2px solid #e2e8f0;border-radius:12px;padding:14px;font-size:15px;resize:vertical;outline:none;transition:border .2s}}
-.card textarea:focus{{border-color:#2563eb}}
-.btn{{display:block;width:100%;padding:14px;background:#2563eb;color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;margin-top:16px;transition:background .2s}}
-.btn:hover{{background:#1d4ed8}}
-.result{{margin-top:20px;padding:20px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;min-height:80px;font-size:14px;line-height:1.7;color:#334155}}
-.result:empty{{display:none}}
-.footer{{text-align:center;padding:24px 0;color:#94a3b8;font-size:12px}}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="header">
-    <h1>{title}</h1>
-    <p>{subtitle}</p>
-    <div class="features">{features_html}</div>
-  </div>
-  <div class="card">
-    <label>{input_label}</label>
-    <textarea id="input" placeholder="{placeholder}"></textarea>
-    <button class="btn" onclick="run()">{btn_text}</button>
-  </div>
-  <div class="card" id="resultCard" style="display:none">
-    <label>处理结果</label>
-    <div class="result" id="result"></div>
-  </div>
-  <div class="footer">Powered by Clawthon AI Agent · {short_name}</div>
-</div>
-<script>
-function processInput(text) {{
-  try {{
-    {js_body}
-  }} catch(e) {{
-    return '<p style="color:red">处理出错：' + e.message + '</p>';
-  }}
-}}
-function run() {{
-  var text = document.getElementById('input').value.trim();
-  if(!text) {{ alert('请先输入内容'); return; }}
-  document.getElementById('resultCard').style.display = 'block';
-  document.getElementById('result').innerHTML = '<div style="text-align:center;color:#2563eb;padding:20px">⏳ 处理中...</div>';
-  setTimeout(function() {{ document.getElementById('result').innerHTML = processInput(text); }}, 300);
-}}
-</script>
-</body>
-</html>"""
-
+    # ==================== Agent Skill ====================
     elif product_type == "agent_skill":
-        code_prompt = f"""为项目「{short_name}」写一个 Python 函数。描述：{desc}
+        prompt = (
+            f"为「{short_name}」写一个 Python 函数。描述：{desc}\n"
+            "要求：函数名 execute_skill，签名 def execute_skill(input_data: dict) -> dict\n"
+            "必须有真实处理逻辑，只用标准库，包含 try/except。\n"
+            "只输出 Python 代码。"
+        )
+        for attempt in range(MAX_REACT_ROUNDS):
+            raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+            code = _clean_code(raw, "agent_skill")
+            # Verify: try compiling + dry-run
+            error = _verify_python_code(code, "execute_skill")
+            if not error:
+                break  # ✅ valid
+            # Fix: feed error back
+            prompt = (
+                f"你上次生成的代码有错误：{error}\n"
+                f"请修复并重新输出完整的 execute_skill 函数。\n"
+                f"项目：{short_name}，描述：{desc}\n"
+                "只输出 Python 代码。"
+            )
 
-要求：函数名 execute_skill，签名 def execute_skill(input_data: dict) -> dict
-必须有真实处理逻辑（不是echo），只用标准库，包含错误处理。
-只输出 Python 代码。"""
-        code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
-        code = _clean_code(code, "agent_skill")
-
-    else:  # mcp_service
-        code_prompt = f"""为项目「{short_name}」写一个 MCP 服务 Python 函数。描述：{desc}
-
-要求：函数名 handle_request，签名 def handle_request(method: str, params: dict) -> dict
-支持至少3个method，真实逻辑，只用标准库。
-只输出 Python 代码。"""
-        code = await call_secondme_chat(token, code_prompt, enable_web_search=False)
-        code = _clean_code(code, "mcp_service")
+    # ==================== MCP Service ====================
+    else:
+        prompt = (
+            f"为「{short_name}」写一个 MCP 服务 Python 函数。描述：{desc}\n"
+            "要求：函数名 handle_request，签名 def handle_request(method: str, params: dict) -> dict\n"
+            "支持至少3个method，真实逻辑，只用标准库，包含错误处理。\n"
+            "只输出 Python 代码。"
+        )
+        for attempt in range(MAX_REACT_ROUNDS):
+            raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+            code = _clean_code(raw, "mcp_service")
+            error = _verify_python_code(code, "handle_request")
+            if not error:
+                break
+            prompt = (
+                f"你上次生成的代码有错误：{error}\n"
+                f"请修复并重新输出完整的 handle_request 函数。\n"
+                f"项目：{short_name}，描述：{desc}\n"
+                "只输出 Python 代码。"
+            )
 
     # Save to project DB
     project.product_code = code
@@ -250,6 +187,95 @@ function run() {{
         "code_length": len(code),
         "endpoint": project.product_endpoint,
     }
+
+
+def _verify_python_code(code: str, expected_func: str) -> Optional[str]:
+    """Try to compile and dry-run Python code. Returns error string or None if OK."""
+    if not code or len(code) < 20:
+        return "代码为空或太短"
+    if expected_func not in code:
+        return f"代码中未找到函数 {expected_func}"
+    try:
+        compile(code, "<sandbox>", "exec")
+    except SyntaxError as e:
+        return f"语法错误: {e}"
+    # Try executing to check for import errors etc.
+    safe_builtins = {
+        "str": str, "int": int, "float": float, "bool": bool,
+        "list": list, "dict": dict, "tuple": tuple, "set": set,
+        "len": len, "range": range, "enumerate": enumerate,
+        "zip": zip, "map": map, "filter": filter,
+        "sorted": sorted, "min": min, "max": max, "sum": sum,
+        "abs": abs, "round": round, "isinstance": isinstance, "type": type,
+        "True": True, "False": False, "None": None,
+        "print": lambda *a, **k: None,
+        "Exception": Exception, "ValueError": ValueError,
+        "TypeError": TypeError, "KeyError": KeyError,
+    }
+    try:
+        ns: dict = {"__builtins__": safe_builtins}
+        exec(code, ns)
+        if expected_func not in ns:
+            return f"执行后未找到函数 {expected_func}"
+        # Quick smoke test
+        func = ns[expected_func]
+        if expected_func == "execute_skill":
+            result = func({"test": "hello"})
+            if not isinstance(result, dict):
+                return f"函数返回类型错误: 期望 dict，得到 {type(result).__name__}"
+        elif expected_func == "handle_request":
+            result = func("test", {})
+            if not isinstance(result, dict):
+                return f"函数返回类型错误: 期望 dict，得到 {type(result).__name__}"
+    except Exception as e:
+        return f"运行时错误: {str(e)[:150]}"
+    return None  # ✅ OK
+
+
+def _generate_fallback_mock_html(name: str, desc: str, mock_features: list) -> str:
+    """Generate a simple but valid mock HTML page as fallback."""
+    features_html = "".join(f"<li>{f}</li>" for f in (mock_features or [])[:5]) or "<li>核心功能演示</li>"
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{name}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:system-ui;background:#f0f4f8;min-height:100vh}}
+nav{{background:#1e293b;color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:center}}
+nav h1{{font-size:18px}}
+.container{{max-width:800px;margin:0 auto;padding:24px}}
+.banner{{background:#fef3c7;color:#92400e;padding:12px;border-radius:8px;text-align:center;font-size:13px;margin-bottom:20px}}
+.card{{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.06);padding:24px;margin-bottom:16px}}
+.card h3{{color:#1e293b;margin-bottom:8px}}
+.card p{{color:#64748b;font-size:14px;line-height:1.6}}
+.btn{{background:#2563eb;color:#fff;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;margin-top:12px}}
+.btn:hover{{background:#1d4ed8}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:16px 0}}
+.stat{{background:#eff6ff;padding:16px;border-radius:8px;text-align:center}}
+.stat .num{{font-size:28px;font-weight:700;color:#2563eb}}
+.stat .label{{font-size:12px;color:#64748b;margin-top:4px}}
+footer{{text-align:center;padding:24px;color:#94a3b8;font-size:12px}}
+#result{{display:none;margin-top:12px;padding:16px;background:#f0fdf4;border-radius:8px;border:1px solid #bbf7d0}}
+</style></head>
+<body>
+<nav><h1>{name}</h1><span style="font-size:13px">Mock 演示</span></nav>
+<div class="container">
+<div class="banner">📋 这是 Mock 演示 · 由 AI Agent 自动开发 · 完整功能需要后端支持</div>
+<div class="card"><h3>产品介绍</h3><p>{desc}</p></div>
+<div class="grid">
+<div class="stat"><div class="num">1,234</div><div class="label">活跃用户</div></div>
+<div class="stat"><div class="num">98.5%</div><div class="label">满意度</div></div>
+<div class="stat"><div class="num">5,678</div><div class="label">处理次数</div></div>
+</div>
+<div class="card"><h3>核心功能</h3><ul style="margin:8px 0 0 20px;color:#475569;font-size:14px">{features_html}</ul></div>
+<div class="card"><h3>试用演示</h3><p>输入内容体验核心流程</p>
+<textarea id="inp" style="width:100%;min-height:80px;margin-top:8px;padding:10px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px" placeholder="输入任意内容..."></textarea>
+<button class="btn" onclick="document.getElementById('result').style.display='block';document.getElementById('result').innerHTML='<strong>✅ 处理完成</strong><br>输入内容已接收（'+document.getElementById('inp').value.length+'字符），Mock 数据已生成。实际产品将接入后端服务处理。'">开始处理</button>
+<div id="result"></div></div>
+</div>
+<footer>Powered by Clawthon AI Agent · {name}</footer>
+</body></html>"""
 
 
 def _clean_code(raw: str, product_type: str) -> str:
