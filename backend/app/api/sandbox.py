@@ -126,41 +126,54 @@ async def develop_product_code(
         if not code or "<html" not in cl or "<body" not in cl:
             code = _generate_fallback_mock_html(short_name, desc, [])
 
-    # ==================== Agent Skill (Towow 标准格式) ====================
+    # ==================== Agent Skill (MCP Tool 格式 — Anthropic 标准) ====================
+    # Skills = 单个 MCP Tool，这样 Agent 之间可以用统一协议互相调用
     elif product_type == "agent_skill":
-        prompt = f"""为「{short_name}」开发一个 Agent Skill（参考 Towow 框架格式）。描述：{desc}
+        prompt = f"""为「{short_name}」开发一个 Agent Skill（遵循 Anthropic MCP Tool 格式）。描述：{desc}
 
-请生成一个完整的 Python 模块，包含：
+一个 Skill 就是一个 MCP Tool。请生成完整 Python 模块：
 
-1. 一个 Skill 类继承自基类，包含：
-   - name 属性（字符串）
-   - description 属性（描述这个 Skill 做什么）
-   - input_schema：dict 描述输入参数格式
-   - output_schema：dict 描述输出格式
-   - async def execute(self, context: dict) -> dict 方法（核心逻辑）
-
-2. 同时提供一个简单的 execute_skill(input_data: dict) -> dict 兼容函数
-
-示例结构：
 ```python
-class {short_name.replace(' ','').replace('-','')}Skill:
-    name = "skill_name"
-    description = "技能描述"
-    input_schema = {{"text": "str", "options": "dict"}}
-    output_schema = {{"result": "str", "metadata": "dict"}}
-    
-    async def execute(self, context: dict) -> dict:
-        # 真实处理逻辑
-        ...
+# === Skill 定义（MCP Tool 格式）===
+SKILL_NAME = "skill_name"
+SKILL_DESCRIPTION = "这个 Skill 做什么"
+SKILL_INPUT_SCHEMA = {{
+    "type": "object",
+    "properties": {{
+        "text": {{"type": "string", "description": "输入文本"}},
+        # ... 更多参数
+    }},
+    "required": ["text"]
+}}
 
-# 兼容函数（沙盒调用用）
+def _execute_impl(arguments: dict) -> dict:
+    \"\"\"Skill 核心逻辑（纯函数，不依赖外部包）\"\"\"
+    text = arguments.get("text", "")
+    # ... 真实处理逻辑 ...
+    return {{
+        "type": "text",
+        "text": "处理结果",
+        "metadata": {{}}  # 可选的元数据
+    }}
+
+# === 沙盒兼容函数 ===
 def execute_skill(input_data: dict) -> dict:
-    import asyncio
-    skill = {short_name.replace(' ','').replace('-','')}Skill()
-    return asyncio.get_event_loop().run_until_complete(skill.execute(input_data))
+    return _execute_impl(input_data)
+
+# === MCP Tool 注册信息（供 MCP Server 使用）===
+MCP_TOOL = {{
+    "name": SKILL_NAME,
+    "description": SKILL_DESCRIPTION,
+    "inputSchema": SKILL_INPUT_SCHEMA
+}}
 ```
 
-要求：只用标准库，包含错误处理，有真实逻辑。只输出 Python 代码。"""
+要求：
+- _execute_impl 必须有真实处理逻辑（不是 echo），至少 15 行
+- 只用 Python 标准库
+- 包含 try/except 错误处理
+- inputSchema 遵循 JSON Schema
+- 只输出 Python 代码"""
 
         for attempt in range(MAX_REACT_ROUNDS):
             raw = await call_secondme_chat(token, prompt, enable_web_search=False)
