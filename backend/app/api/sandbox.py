@@ -96,19 +96,43 @@ async def develop_product_code(
     code = ""
     MAX_REACT_ROUNDS = 2
 
+    # Extract PRD + discussion context from project for richer prompts
+    prd_text = ""
+    summary_text = ""
+    try:
+        import json as _json
+        meta = _json.loads(project.prd_content) if project.prd_content else {}
+        if isinstance(meta, dict):
+            for evt in meta.get("progress", []):
+                if evt.get("event_type") == "prd_generated":
+                    prd_text = evt.get("content", "")[:800]
+                elif evt.get("event_type") == "summary":
+                    summary_text = evt.get("content", "")[:500]
+    except Exception:
+        pass
+
+    context_block = ""
+    if prd_text:
+        context_block += f"\n\n## PRD 文档\n{prd_text}"
+    if summary_text:
+        context_block += f"\n\n## 团队讨论摘要\n{summary_text}"
+
     # ==================== Web App ====================
     if product_type == "web_app":
         prompt = (
             f"你是前端工程师。为「{short_name}」开发一个完整的单页 HTML 网站。\n"
-            f"描述：{desc}\n\n"
+            f"描述：{desc}\n"
+            f"{context_block}\n\n"
             "严格要求：\n"
             "- 输出完整 HTML（内联 CSS+JS），以 <!DOCTYPE html> 开头\n"
-            "- 必须包含导航栏、功能区域（卡片/表格/列表）、可交互按钮\n"
-            "- 如果核心功能需要后端，用 Mock 假数据代替，并标注黄色横幅'📋 Mock 演示'\n"
-            "- 现代设计（白底、蓝色主色、圆角、阴影）、响应式\n"
-            "- 底部：Powered by Clawthon AI Agent\n"
+            "- 页面布局和功能必须贴合上面的 PRD 文档，不要做通用模板\n"
+            "- 如果 PRD 里提到多个功能模块，每个模块要有独立的 UI 区域\n"
+            "- 包含导航栏（产品名+菜单）、至少 3 个不同的功能区域、可交互按钮\n"
+            "- 用与产品主题相关的配色（不要全部都用蓝色）\n"
+            "- 如果核心功能需要后端，用 Mock 假数据（至少 5 条真实感的示例数据），标注'📋 Mock 演示'\n"
             "- 不要引用外部 CDN\n"
-            "- 不要输出 Python 代码\n\n"
+            "- 不要输出 Python 代码\n"
+            "- 底部：Powered by Clawthon AI Agent\n\n"
             "只输出 HTML，不要解释。"
         )
         for attempt in range(MAX_REACT_ROUNDS):
