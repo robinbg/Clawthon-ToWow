@@ -71,20 +71,21 @@ async def develop_product_code(
     short_name = (project.name or "Product").replace("[Auto] ", "")[:40]
 
     # Step 1: Classify product type
+    # 分类：面向人类 = web_app，面向 Agent = mcp_service（Skills 就是 MCP Tools）
     classify_raw = await call_secondme_chat(
         token,
-        f"判断项目「{short_name}」（描述：{desc}）最适合做哪种产品。"
-        "如果面向人类用户用浏览器使用，返回 web_app；"
-        "如果是给其他 Agent 调用的能力接口，返回 agent_skill；"
-        "如果是标准化数据/工具 API 服务，返回 mcp_service。"
-        '只返回 JSON：{"type":"web_app|agent_skill|mcp_service"}',
+        f"判断项目「{short_name}」（描述：{desc}）面向谁。"
+        "如果面向人类用户在浏览器中使用，返回 web_app；"
+        "如果面向其他 AI Agent 提供能力/接口/服务，返回 mcp_service。"
+        '只返回 JSON：{"type":"web_app|mcp_service"}',
         enable_web_search=False,
     )
     product_type = "web_app"
     try:
         pt = parse_json_from_text(classify_raw).get("type", "web_app")
-        if pt in ("web_app", "agent_skill", "mcp_service"):
-            product_type = pt
+        if pt in ("web_app", "mcp_service", "agent_skill"):
+            # agent_skill 统一归为 mcp_service（Skills = MCP Tools）
+            product_type = "mcp_service" if pt in ("mcp_service", "agent_skill") else "web_app"
     except Exception:
         pass
 
@@ -126,115 +127,9 @@ async def develop_product_code(
         if not code or "<html" not in cl or "<body" not in cl:
             code = _generate_fallback_mock_html(short_name, desc, [])
 
-    # ==================== Agent Skill (Anthropic Agent Skills 格式) ====================
-    # 官方格式：目录 + SKILL.md + scripts/ + templates/
-    # 我们生成一个 JSON 描述（包含 SKILL.md 内容 + 脚本代码），前端展示为结构化 Skill 包
-    elif product_type == "agent_skill":
-        prompt = f"""为「{short_name}」开发一个 Agent Skill（遵循 Anthropic Agent Skills 格式）。描述：{desc}
-
-Anthropic Agent Skills 是文件系统上的目录，包含：
-- SKILL.md：指令文档，告诉 Claude 这个 Skill 做什么、怎么用
-- scripts/：可执行脚本（Claude 运行脚本，只看输出）
-- templates/：模板文件
-
-请生成一个完整的 Skill 包，用 JSON 格式输出（不要其他内容）：
-{{
-  "skill_name": "技能名称（英文下划线格式）",
-  "skill_description": "一句话描述",
-  "skill_md": "完整的 SKILL.md 内容（Markdown 格式），包含：\\n## 概述\\n## 使用场景\\n## 输入格式\\n## 输出格式\\n## 使用示例\\n## 注意事项",
-  "scripts": [
-    {{
-      "filename": "main.py",
-      "description": "核心处理脚本",
-      "code": "完整的 Python 脚本代码（接收命令行参数，输出结果到 stdout）"
-    }}
-  ],
-  "templates": [
-    {{
-      "filename": "output_template.md",
-      "content": "输出模板内容"
-    }}
-  ]
-}}
-
-要求：
-- SKILL.md 要详细、有使用示例
-- 脚本用 Python 标准库，通过 sys.argv 或 stdin 接收输入
-- 脚本必须有真实处理逻辑（至少 20 行）
-- 只输出 JSON"""
-
-        raw = await call_secondme_chat(token, prompt, enable_web_search=False)
-        skill_data = parse_json_from_text(raw)
-
-        # Build code that wraps the skill for sandbox execution
-        script_code = ""
-        if skill_data.get("scripts"):
-            script_code = skill_data["scripts"][0].get("code", "")
-        skill_md = skill_data.get("skill_md", f"# {short_name}\n\n{desc}")
-
-        # Generate a combined Python module for sandbox + a readable SKILL.md
-        code = f'''# === Anthropic Agent Skill: {skill_data.get("skill_name", short_name)} ===
-# 格式：目录结构 + SKILL.md + scripts/
-# 
-# {short_name}/
-# ├── SKILL.md
-# ├── scripts/
-# │   └── main.py
-# └── templates/
-#     └── output_template.md
-
-# ============ SKILL.md 内容 ============
-SKILL_MD = """{skill_md}"""
-
-# ============ 核心脚本 (scripts/main.py) ============
-SCRIPT_CODE = """{script_code}"""
-
-# ============ Skill 元数据 ============
-SKILL_NAME = "{skill_data.get("skill_name", "skill")}"
-SKILL_DESCRIPTION = "{skill_data.get("skill_description", desc[:80])}"
-
-# ============ 沙盒执行兼容函数 ============
-def execute_skill(input_data: dict) -> dict:
-    """在沙盒中执行 Skill 的核心逻辑"""
-    try:
-        # 模拟脚本执行环境
-        import io, sys
-        text = input_data.get("text", input_data.get("input", str(input_data)))
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        
-        # 注入输入变量并执行脚本
-        exec_globals = {{"__builtins__": __builtins__, "input_text": text, "input_data": input_data}}
-        exec(SCRIPT_CODE, exec_globals)
-        
-        output = sys.stdout.getvalue()
-        sys.stdout = old_stdout
-        
-        return {{"result": output.strip() if output.strip() else "执行完成", "skill": SKILL_NAME}}
-    except Exception as e:
-        return {{"error": str(e), "skill": SKILL_NAME}}
-'''
-        # Skip the normal prompt flow since we already built the code
-        pass  # code is already set
-
-        # Code-ReAct: verify execute_skill works
-        for attempt in range(MAX_REACT_ROUNDS):
-            error = _verify_python_code(code, "execute_skill")
-            if not error:
-                break
-            # Re-generate script part only
-            fix_prompt = (
-                f"你上次生成的 Skill 脚本有错误：{error}\n"
-                f"请只输出修复后的 Python 脚本代码（不要 JSON 包装）。\n"
-                f"项目：{short_name}，描述：{desc}"
-            )
-            raw = await call_secondme_chat(token, fix_prompt, enable_web_search=False)
-            fixed_script = _clean_code(raw, "agent_skill")
-            if fixed_script:
-                code = code.replace(script_code, fixed_script)
-                script_code = fixed_script
-
-    # ==================== MCP Service (Anthropic 官方 MCP Python SDK — FastMCP) ====================
+    # ==================== MCP Service / Agent Skill (统一为 MCP — Anthropic FastMCP) ====================
+    # 在 MCP 中，Skills = Tools。所有面向 Agent 的产品都是 MCP Server，暴露 Tools。
+    # 协议：JSON-RPC 2.0，发现用 tools/list，调用用 tools/call。
     else:
         prompt = f"""为「{short_name}」开发一个 MCP Server（使用 Anthropic 官方 FastMCP SDK）。描述：{desc}
 
@@ -517,9 +412,7 @@ async def call_product(
     except Exception:
         pass
 
-    if product_type == "agent_skill":
-        return _execute_skill_sandbox_code(project_id, code, body)
-    elif product_type == "mcp_service":
+    if product_type in ("agent_skill", "mcp_service"):
         method = body.get("method", "")
         params = body.get("params", {})
         return _execute_mcp_sandbox_code(project_id, code, method, params)
