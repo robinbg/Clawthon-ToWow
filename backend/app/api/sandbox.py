@@ -131,187 +131,181 @@ async def develop_product_code(
         if not code or "<html" not in cl or "<body" not in cl:
             code = _generate_fallback_mock_html(short_name, desc, [])
 
-    # ==================== Agent Skill（知识与逻辑层 — "怎么做"）====================
-    # Skills 定义业务流程、领域知识、工作流编排
-    # 格式：SKILL.md（指令文档）+ 工作流脚本 + 领域知识模板
+    # ==================== Agent Skill（Claude Skills 官方格式）====================
+    # 官方格式：SKILL.md + scripts/ 目录
+    # - SKILL.md：Claude 读取的指令文档
+    # - scripts/：可执行脚本，Claude 运行并只看 stdout
+    # - 通过 skill_id 注册，API 用 container 参数加载
     elif product_type == "agent_skill":
-        prompt = f"""为「{short_name}」开发一个 Agent Skill（知识与逻辑层）。描述：{desc}
+        prompt = f"""为「{short_name}」开发一个 Claude Agent Skill（官方格式）。描述：{desc}
 
-Agent Skill 是业务技能包，告诉 Agent "怎么做"某件事。它包含：
-- 业务流程定义（步骤、判断逻辑、分支）
-- 领域知识和最佳实践
-- 工作流编排脚本
-
-请生成完整的 Skill 包代码：
-
-```python
-# === Agent Skill: {short_name} ===
-# 知识与逻辑层 —— 定义业务流程和领域知识
-
-SKILL_NAME = "skill_name"
-SKILL_DESCRIPTION = "技能描述"
-
-# 技能文档（SKILL.md 内容）
-SKILL_DOC = \"\"\"
-## 概述
-这个技能做什么
-
-## 适用场景
-- 场景1
-- 场景2
-
-## 工作流程
-1. 第一步：...
-2. 第二步：...
-3. 第三步：...
-
-## 输入格式
-- task: 任务描述 (str)
-- context: 上下文信息 (dict)
-
-## 输出格式
-- result: 处理结果 (str)
-- steps: 执行的步骤记录 (list)
-- recommendations: 建议 (list)
-
-## 领域知识
-- 知识点1
-- 知识点2
-
-## 最佳实践
-- 实践1
-- 实践2
-\"\"\"
-
-# 工作流步骤定义
-WORKFLOW_STEPS = [
-    {{"step": 1, "name": "理解任务", "action": "analyze_intent"}},
-    {{"step": 2, "name": "选择策略", "action": "select_strategy"}},
-    {{"step": 3, "name": "执行处理", "action": "execute"}},
-    {{"step": 4, "name": "验证结果", "action": "validate"}},
-]
-
-# 领域知识库
-DOMAIN_KNOWLEDGE = {{
-    "patterns": [...],
-    "rules": [...],
-    "best_practices": [...],
-}}
-
-def execute_skill(input_data: dict) -> dict:
-    \"\"\"执行技能的完整工作流\"\"\"
-    task = input_data.get("task", input_data.get("text", ""))
-    context = input_data.get("context", {{}})
-    
-    steps_log = []
-    result = ""
-    recommendations = []
-    
-    # Step 1: 理解任务意图
-    # ... 真实逻辑 ...
-    
-    # Step 2-N: 按工作流执行
-    # ... 真实逻辑 ...
-    
-    return {{
-        "skill": SKILL_NAME,
-        "result": result,
-        "steps": steps_log,
-        "recommendations": recommendations,
-    }}
+Claude Agent Skills 是文件系统上的目录结构：
+```
+{short_name}/
+├── SKILL.md          # 指令文档（Claude 读取）
+├── scripts/
+│   ├── main.py       # 核心脚本（Claude 运行，只看 stdout）
+│   └── validate.py   # 验证脚本
+└── templates/
+    └── output.md     # 输出模板
 ```
 
-要求：
-- SKILL_DOC 要详细，包含领域知识和最佳实践
-- WORKFLOW_STEPS 至少 4 步
-- execute_skill 必须按工作流真实执行每个步骤
-- 只用标准库，包含错误处理
-- 只输出 Python 代码"""
+请生成一个 JSON，包含这个 Skill 的所有文件内容：
 
+{{
+  "skill_id": "英文下划线格式的技能ID",
+  "skill_md": "SKILL.md 的完整 Markdown 内容，必须包含：\\n# 技能名称\\n\\n## 概述\\n说明做什么\\n\\n## 使用场景\\n- 场景列表\\n\\n## 工作流程\\n详细步骤\\n\\n## 输入\\n接受什么参数\\n\\n## 输出\\n返回什么结果\\n\\n## 脚本\\n可用的脚本及用途\\n\\n## 示例\\n使用示例\\n\\n## 领域知识\\n关键规则和最佳实践",
+  "main_script": "scripts/main.py 的完整 Python 代码（通过 sys.argv 接收输入，print 输出结果，只用标准库，至少 30 行真实逻辑）",
+  "validate_script": "scripts/validate.py 的完整 Python 代码（验证输入有效性）",
+  "output_template": "templates/output.md 的 Markdown 模板"
+}}
+
+只输出 JSON。"""
+
+        raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+        skill_data = parse_json_from_text(raw)
+
+        skill_id = skill_data.get("skill_id", "skill")
+        skill_md = skill_data.get("skill_md", f"# {short_name}\\n\\n{desc}")
+        main_script = skill_data.get("main_script", "import sys\\nprint('Skill executed')")
+        validate_script = skill_data.get("validate_script", "print('valid')")
+        output_template = skill_data.get("output_template", "# Output\\n\\n{{result}}")
+
+        code = f'''# ================================================================
+# Claude Agent Skill: {skill_id}
+# 官方格式：SKILL.md + scripts/ + templates/
+#
+# 目录结构:
+#   {skill_id}/
+#   ├── SKILL.md
+#   ├── scripts/
+#   │   ├── main.py
+#   │   └── validate.py
+#   └── templates/
+#       └── output.md
+# ================================================================
+
+SKILL_ID = "{skill_id}"
+
+# ============ SKILL.md ============
+SKILL_MD = """{skill_md}"""
+
+# ============ scripts/main.py ============
+MAIN_SCRIPT = """{main_script}"""
+
+# ============ scripts/validate.py ============
+VALIDATE_SCRIPT = """{validate_script}"""
+
+# ============ templates/output.md ============
+OUTPUT_TEMPLATE = """{output_template}"""
+
+# ============ 沙盒执行兼容函数 ============
+def execute_skill(input_data: dict) -> dict:
+    """在沙盒中执行 Skill 的 main.py 脚本"""
+    import io, sys
+    try:
+        text = input_data.get("text", input_data.get("input", str(input_data)))
+        old_stdout, old_argv = sys.stdout, sys.argv
+        sys.stdout = io.StringIO()
+        sys.argv = ["main.py", text]
+        exec_ns = {{"__builtins__": __builtins__, "__name__": "__main__"}}
+        exec(MAIN_SCRIPT, exec_ns)
+        output = sys.stdout.getvalue()
+        sys.stdout, sys.argv = old_stdout, old_argv
+        return {{"skill": SKILL_ID, "result": output.strip() or "执行完成"}}
+    except Exception as e:
+        sys.stdout, sys.argv = old_stdout, old_argv
+        return {{"skill": SKILL_ID, "error": str(e)}}
+
+# ============ Skill 文件导出（用于下载/部署）============
+def export_skill_files() -> dict:
+    return {{
+        f"{{SKILL_ID}}/SKILL.md": SKILL_MD,
+        f"{{SKILL_ID}}/scripts/main.py": MAIN_SCRIPT,
+        f"{{SKILL_ID}}/scripts/validate.py": VALIDATE_SCRIPT,
+        f"{{SKILL_ID}}/templates/output.md": OUTPUT_TEMPLATE,
+    }}
+'''
+        # Code-ReAct verify
         for attempt in range(MAX_REACT_ROUNDS):
-            raw = await call_secondme_chat(token, prompt, enable_web_search=False)
-            code = _clean_code(raw, "agent_skill")
             error = _verify_python_code(code, "execute_skill")
             if not error:
                 break
-            prompt = (
-                f"你上次生成的代码有错误：{error}\n"
-                f"请修复并重新输出完整的 Agent Skill 代码。\n"
-                f"项目：{short_name}，描述：{desc}\n"
-                "只输出 Python 代码。"
-            )
+            fix_raw = await call_secondme_chat(token, f"脚本有错误：{error}。请只输出修复后的 main.py Python 脚本代码。项目：{short_name}", enable_web_search=False)
+            fixed = _clean_code(fix_raw, "agent_skill")
+            if fixed:
+                code = code.replace(main_script, fixed)
 
-    # ==================== MCP Service（连接与执行层 — "能做什么"）====================
-    # MCP 暴露标准化工具接口，执行具体调用、访问外部数据
-    # 格式：FastMCP @mcp.tool() + JSON-RPC 2.0
+    # ==================== MCP Server（Anthropic 官方 FastMCP 格式）====================
+    # 官方格式：FastMCP SDK，@mcp.tool() 装饰器注册工具
+    # 协议：JSON-RPC 2.0，stdio/SSE transport
+    # 安装：pip install mcp[cli]
+    # 运行：mcp dev server.py 或 python server.py
     else:
-        prompt = f"""为「{short_name}」开发一个 MCP Server（使用 Anthropic 官方 FastMCP SDK）。描述：{desc}
+        prompt = f"""为「{short_name}」开发一个 MCP Server（Anthropic 官方 FastMCP 格式）。描述：{desc}
 
-请按照 Anthropic 官方 MCP Python SDK（FastMCP）格式生成代码。
-
-FastMCP 是 Anthropic 推荐的 MCP Server 开发方式，核心是用 @mcp.tool() 装饰器注册工具。
-
-请生成完整代码：
+官方 FastMCP 格式（pip install mcp[cli]）：
 
 ```python
-# === MCP Server（Anthropic FastMCP 格式）===
-# pip install mcp[cli]
-# 运行: python server.py 或 mcp dev server.py
+from mcp.server.fastmcp import FastMCP
 
-# from mcp.server.fastmcp import FastMCP
-# mcp = FastMCP("server_name")
+mcp = FastMCP("server_name")
 
-# @mcp.tool()
-# def tool1(query: str) -> str:
-#     \"\"\"工具1的描述\"\"\"
-#     return "结果"
+@mcp.tool()
+def my_tool(query: str) -> str:
+    \"\"\"工具描述\"\"\"
+    return "结果"
 
-# @mcp.tool() 
-# def tool2(data: str, format: str = "json") -> str:
-#     \"\"\"工具2的描述\"\"\"
-#     return "结果"
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
 
-# if __name__ == "__main__":
-#     mcp.run(transport="stdio")
+请生成完整代码，包含两部分：
+1. 可直接运行的 FastMCP Server（顶部）
+2. 不依赖 mcp 包的沙盒兼容版（底部）
 
-# === 以下是不依赖 mcp 包的纯实现（用于沙盒执行）===
+```python
+# ================================================================
+# MCP Server: {short_name}
+# 安装: pip install mcp[cli]
+# 运行: mcp dev server.py 或 python server.py
+# ================================================================
 
-SERVER_NAME = "service_name"
+from mcp.server.fastmcp import FastMCP
 
-def tool1(query: str) -> str:
+mcp = FastMCP("{short_name}")
+
+@mcp.tool()
+def tool1(param1: str) -> str:
     \"\"\"工具1描述\"\"\"
     # 真实逻辑
     return "结果"
 
-def tool2(data: str, format: str = "json") -> str:
+@mcp.tool()
+def tool2(data: str, option: str = "default") -> str:
     \"\"\"工具2描述\"\"\"
-    # 真实逻辑
     return "结果"
 
-# 工具注册表
-TOOLS = {{
-    "tool1": tool1,
-    "tool2": tool2,
-}}
+@mcp.tool()
+def tool3(items: str) -> str:
+    \"\"\"工具3描述\"\"\"
+    return "结果"
 
-# 沙盒兼容函数
-def handle_request(method: str, params: dict) -> dict:
-    if method not in TOOLS:
-        return {{"error": f"Unknown tool: {{method}}", "available": list(TOOLS.keys())}}
-    try:
-        result = TOOLS[method](**params)
-        return {{"result": result, "tool": method}}
-    except Exception as e:
-        return {{"error": str(e), "tool": method}}
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+
+# ================================================================
+# 沙盒兼容版（不依赖 mcp 包，可在 Clawthon 沙盒中直接调用）
+# ================================================================
+# ... 同样的 tool 函数（不需要装饰器）...
+# TOOLS = {{"tool1": tool1, ...}}
+# def handle_request(method, params): ...
 ```
 
 要求：
-- 至少3个 tool 函数，每个有 docstring 和真实逻辑
-- 函数签名用 Python 类型注解（FastMCP 自动推导 inputSchema）
-- 纯实现部分只用标准库
-- 包含错误处理
-- 顶部注释掉的是 FastMCP 版（可以 pip install mcp 后直接用）
-- 下方是不依赖 mcp 包的纯实现 + handle_request 兼容函数
+- 至少 3 个 @mcp.tool()，每个有 docstring + 真实逻辑
+- 用 Python 类型注解（FastMCP 自动推导 JSON Schema）
+- 下方沙盒版只用标准库
 - 只输出 Python 代码"""
 
         for attempt in range(MAX_REACT_ROUNDS):
@@ -321,10 +315,8 @@ def handle_request(method: str, params: dict) -> dict:
             if not error:
                 break
             prompt = (
-                f"你上次生成的代码有错误：{error}\n"
-                f"请修复并重新输出完整代码（包含 MCP 类和 handle_request 兼容函数）。\n"
-                f"项目：{short_name}，描述：{desc}\n"
-                "只输出 Python 代码。"
+                f"代码有错误：{error}。请修复并重新输出完整 MCP Server 代码。\n"
+                f"项目：{short_name}，描述：{desc}。只输出 Python 代码。"
             )
 
     # Save to project DB
