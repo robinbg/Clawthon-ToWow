@@ -101,83 +101,58 @@ async def develop_product_code(
         logic = parse_json_from_text(logic_raw)
 
     elif product_type == "web_app":
-        # MOCK mode — PRD + demo UI with simulated data
-        logic_prompt = f"""项目「{short_name}」超出纯前端能力（需要后端/数据库/AI API），做一个 PRD + Mock 演示界面。
-描述：{desc}
-无法实现的功能：{', '.join(mock_features) if mock_features else '需要服务端'}
+        # MOCK mode — Let SecondMe write a COMPLETE custom HTML page from scratch based on PRD
+        # No template — every product looks different
+        mock_prompt = f"""你是一个资深前端开发工程师。请根据以下产品需求，从零开发一个完整的 Mock 演示网站。
 
-请返回 JSON（不要其他内容）：
-{{
-  "title": "产品名称（10字以内）",
-  "subtitle": "一句话描述（20字以内）",
-  "input_label": "输入框提示",
-  "input_placeholder": "placeholder",
-  "button_text": "按钮文字",
-  "features": ["功能1", "功能2", "功能3"],
-  "prd_summary": "3-5句话的PRD摘要，描述产品定位、目标用户、核心功能",
-  "mock_responses": ["点击按钮后显示的模拟结果1", "模拟结果2", "模拟结果3"]
-}}"""
-        logic_raw = await call_secondme_chat(token, logic_prompt, enable_web_search=False)
-        logic = parse_json_from_text(logic_raw)
+产品名称：{short_name}
+产品描述：{desc}
+需要后端才能实现的功能（用 Mock 数据代替）：{', '.join(mock_features) if mock_features else '需要服务端支持的功能'}
 
-    # Extract common fields
-    title = logic.get("title", short_name)
-    subtitle = logic.get("subtitle", desc[:50])
-    input_label = logic.get("input_label", "请输入内容")
-    placeholder = logic.get("input_placeholder", "在此输入...")
-    btn_text = logic.get("button_text", "处理")
-    features = logic.get("features", ["功能1", "功能2", "功能3"])
-    features_html = "".join(f'<span style="background:#eff6ff;color:#2563eb;padding:4px 12px;border-radius:20px;font-size:13px">{f}</span>' for f in features[:5])
+## 要求：
+1. 输出一个完整的 HTML 文件，包含内联 CSS 和 JS
+2. 这是一个 Mock 演示站——界面和交互流程要完整，但数据用预设的假数据
+3. 页面必须像一个真实产品的首页/主界面，包含：
+   - 顶部导航栏（产品名+几个菜单项）
+   - 产品 Hero 区域或核心功能展示
+   - 至少 2-3 个功能区域（用卡片/表格/列表展示 Mock 数据）
+   - 可交互元素（按钮点击弹出 mock 结果、Tab 切换、搜索过滤等）
+   - 底部信息栏
+4. 在页面某处用黄色横幅标注"📋 这是 Mock 演示 · 由 AI Agent 自动开发 · 完整功能需要后端支持"
+5. 底部显示 "Powered by Clawthon AI Agent"
+6. 设计要专业、现代（白色/浅灰底、蓝色主色调、圆角卡片、阴影）
+7. 不要引用外部 CDN，CSS/JS 全部内联
+8. 必须以 <!DOCTYPE html> 开头
 
-    if product_type == "web_app" and is_feasible:
-        # Full implementation JS
+每个产品的页面布局和功能区域都应该不同——根据产品需求定制设计，不要用通用模板。
+
+只输出 HTML 代码，不要任何解释。"""
+
+        code = await call_secondme_chat(token, mock_prompt, enable_web_search=False)
+        code = _clean_code(code, "web_app")
+
+        # If SecondMe returned garbage, use a minimal fallback
+        if not code or len(code) < 200 or not code.strip().lower().startswith("<!doctype"):
+            code = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{short_name}</title></head>
+<body style="font-family:system-ui;max-width:700px;margin:40px auto;padding:20px">
+<h1>{short_name}</h1><p>{desc}</p>
+<div style="background:#fef3c7;padding:12px;border-radius:8px;margin:20px 0">📋 Mock 演示 · 由 AI Agent 开发</div>
+<p>产品开发中...</p>
+<footer style="margin-top:40px;color:#94a3b8;font-size:12px">Powered by Clawthon AI Agent</footer>
+</body></html>"""
+
+    # For feasible products, use the template approach
+    if is_feasible:
+        logic = parse_json_from_text(logic_raw) if 'logic_raw' in dir() else {}
+        title = logic.get("title", short_name)
+        subtitle = logic.get("subtitle", desc[:50])
+        input_label = logic.get("input_label", "请输入内容")
+        placeholder = logic.get("input_placeholder", "在此输入...")
+        btn_text = logic.get("button_text", "处理")
+        features = logic.get("features", ["功能1", "功能2", "功能3"])
+        features_html = "".join(f'<span style="background:#eff6ff;color:#2563eb;padding:4px 12px;border-radius:20px;font-size:13px">{f}</span>' for f in features[:5])
         js_body = logic.get("js_process_function", "return '<p>处理完成：' + text.length + ' 个字符</p>';")
-        mode_badge = ""
-        process_script = f"""function processInput(text) {{
-  try {{
-    {js_body}
-  }} catch(e) {{
-    return '<p style="color:red">处理出错：' + e.message + '</p>';
-  }}
-}}"""
-    else:
-        # Mock mode — show PRD + simulated results
-        prd_summary = logic.get("prd_summary", f"{title}：{subtitle}")
-        mock_responses = logic.get("mock_responses", ["这是模拟结果，实际产品需要后端支持。"])
-        mock_json = json.dumps(mock_responses, ensure_ascii=False)
-        mock_features_str = assess.get("mock_features", [])
-        mock_list_html = "".join(f"<li>{mf}</li>" for mf in mock_features_str[:5]) if mock_features_str else "<li>需要后端服务支持</li>"
-        features_detail_html = "".join(f"<li>{f}</li>" for f in features[:5])
-        prd_escaped = prd_summary.replace("'", "\\'").replace("\n", " ")
 
-        mode_badge = f'''<div style="background:#fef3c7;color:#92400e;padding:8px 16px;border-radius:8px;font-size:13px;margin-top:12px;text-align:center">📋 PRD + Mock 演示 · 完整功能需要后端服务支持</div>
-</div>
-<div class="card" style="border-left:4px solid #2563eb">
-  <label>📄 产品需求文档 (PRD)</label>
-  <div style="font-size:14px;line-height:1.8;color:#334155">
-    <p style="margin-bottom:12px">{prd_summary}</p>
-    <div style="margin:12px 0">
-      <strong>核心功能</strong>
-      <ul style="margin:8px 0 8px 20px;color:#475569">{features_detail_html}</ul>
-    </div>
-    <div style="margin:12px 0">
-      <strong>⚠️ 需要后端实现的部分</strong>
-      <ul style="margin:8px 0 8px 20px;color:#92400e">{mock_list_html}</ul>
-    </div>
-    <div style="margin-top:12px;padding:10px;background:#f0fdf4;border-radius:8px;font-size:12px;color:#166534">
-      ✅ 以下是 Mock 演示界面 — 可以体验交互流程，数据为模拟生成
-    </div>
-  </div>'''
-
-        process_script = f"""var _mockResponses = {mock_json};
-var _mockIdx = 0;
-function processInput(text) {{
-  var r = _mockResponses[_mockIdx % _mockResponses.length];
-  _mockIdx++;
-  return '<div><strong>🎯 模拟结果</strong><p style="margin:8px 0">' + r + '</p><p style="color:#94a3b8;font-size:12px;margin-top:8px">💡 Mock 演示数据 · 输入：' + text.substring(0,30) + (text.length>30?'...':'') + '</p></div>';
-}}"""
-
-    if product_type == "web_app":
         code = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -198,15 +173,9 @@ body{{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;min-heig
 .card textarea:focus{{border-color:#2563eb}}
 .btn{{display:block;width:100%;padding:14px;background:#2563eb;color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:600;cursor:pointer;margin-top:16px;transition:background .2s}}
 .btn:hover{{background:#1d4ed8}}
-.btn:active{{transform:scale(.98)}}
 .result{{margin-top:20px;padding:20px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;min-height:80px;font-size:14px;line-height:1.7;color:#334155}}
 .result:empty{{display:none}}
-.result h3{{color:#1e293b;margin-bottom:8px}}
-.result table{{width:100%;border-collapse:collapse;margin:10px 0}}
-.result th,.result td{{padding:8px 12px;border:1px solid #e2e8f0;text-align:left;font-size:13px}}
-.result th{{background:#f1f5f9;font-weight:600}}
 .footer{{text-align:center;padding:24px 0;color:#94a3b8;font-size:12px}}
-.loading{{text-align:center;color:#2563eb;padding:20px}}
 </style>
 </head>
 <body>
@@ -215,7 +184,6 @@ body{{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;min-heig
     <h1>{title}</h1>
     <p>{subtitle}</p>
     <div class="features">{features_html}</div>
-    {mode_badge}
   </div>
   <div class="card">
     <label>{input_label}</label>
@@ -229,17 +197,19 @@ body{{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;min-heig
   <div class="footer">Powered by Clawthon AI Agent · {short_name}</div>
 </div>
 <script>
-{process_script}
+function processInput(text) {{
+  try {{
+    {js_body}
+  }} catch(e) {{
+    return '<p style="color:red">处理出错：' + e.message + '</p>';
+  }}
+}}
 function run() {{
   var text = document.getElementById('input').value.trim();
   if(!text) {{ alert('请先输入内容'); return; }}
-  var resultDiv = document.getElementById('result');
-  var card = document.getElementById('resultCard');
-  card.style.display = 'block';
-  resultDiv.innerHTML = '<div class="loading">⏳ 正在处理...</div>';
-  setTimeout(function() {{
-    resultDiv.innerHTML = processInput(text);
-  }}, 300);
+  document.getElementById('resultCard').style.display = 'block';
+  document.getElementById('result').innerHTML = '<div style="text-align:center;color:#2563eb;padding:20px">⏳ 处理中...</div>';
+  setTimeout(function() {{ document.getElementById('result').innerHTML = processInput(text); }}, 300);
 }}
 </script>
 </body>
