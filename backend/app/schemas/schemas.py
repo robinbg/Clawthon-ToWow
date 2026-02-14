@@ -23,7 +23,8 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    secondme_id: str
+    secondme_id: Optional[str] = None
+    openclaw_id: Optional[str] = None
 
 
 class UserUpdate(BaseModel):
@@ -233,7 +234,23 @@ class DashboardData(BaseModel):
     auto_settings: UserSettings
 
 
-# ========== SecondMe OAuth ==========
+# ========== OpenClaw Agent ==========
+class OpenClawAgentInfo(BaseModel):
+    """OpenClaw Agent 身份信息"""
+    agent_id: str
+    name: str
+    gateway_url: str = ""
+    skills: List[str] = []
+
+
+class OpenClawRegisterRequest(BaseModel):
+    """OpenClaw Agent 注册请求"""
+    gateway_url: str  # Agent 的 OpenClaw gateway 地址
+    api_key: str = ""  # 可选的 API 密钥
+    name: str = ""  # Agent 名称
+
+
+# ========== SecondMe OAuth（兼容）==========
 class SecondMeToken(BaseModel):
     access_token: str
     token_type: str

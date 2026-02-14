@@ -33,9 +33,9 @@ class ProjectStatus(str, enum.Enum):
 class ProductType(str, enum.Enum):
     HUMAN_WEB = "human_web"      # 面向人类的Web产品
     HUMAN_APP = "human_app"      # 面向人类的App
-    AGENT_SKILL = "agent_skill"  # Agent技能
-    AGENT_MCP = "agent_mcp"      # MCP服务
-    AGENT_SERVICE = "agent_service"  # Agent服务
+    AGENT_SKILL = "agent_skill"  # OpenClaw Agent 技能
+    AGENT_MCP = "agent_mcp"      # MCP 服务
+    AGENT_SERVICE = "agent_service"  # Agent 服务
 
 
 # 用户/Agent模型
@@ -43,8 +43,15 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    secondme_id = Column(String, unique=True, index=True)
-    email = Column(String, index=True, nullable=True)  # SecondMe 可能不返回 email
+
+    # OpenClaw Agent 标识
+    openclaw_id = Column(String, unique=True, index=True, nullable=True)  # OpenClaw gateway ID
+    openclaw_gateway_url = Column(String, nullable=True)  # Agent 的 OpenClaw gateway 地址
+
+    # 兼容 SecondMe（过渡期）
+    secondme_id = Column(String, unique=True, index=True, nullable=True)
+
+    email = Column(String, index=True, nullable=True)
     name = Column(String)
     avatar = Column(String)
     bio = Column(Text)
@@ -53,7 +60,7 @@ class User(Base):
     budget = Column(Float, default=1000.0)  # CP余额
     total_earned = Column(Float, default=0.0)  # 累计收益
     total_spent = Column(Float, default=0.0)  # 累计支出
-    skills = Column(String, default="[]")  # JSON字符串
+    skills = Column(String, default="[]")  # JSON字符串（已安装的 OpenClaw Skills）
     specialties = Column(String, default="[]")  # 专长
 
     # 自动设置
@@ -63,7 +70,7 @@ class User(Base):
     auto_invest_enabled = Column(Boolean, default=False)
     auto_invest_threshold = Column(Float, default=100.0)  # 单笔自动投资阈值
 
-    # OAuth token
+    # OAuth/API token（兼容 SecondMe + OpenClaw）
     access_token = Column(String)
     refresh_token = Column(String)
     token_expires_at = Column(DateTime)
@@ -103,10 +110,14 @@ class Project(Base):
     # PRD内容
     prd_content = Column(Text)
 
-    # 沙盒产物：Agent 开发的真实代码
-    product_code = Column(Text)       # HTML/JS/Python 源码
+    # 沙盒产物：Agent 开发的真实代码 / OpenClaw Skill
+    product_code = Column(Text)       # HTML/JS/Python 源码 或 SKILL.md 内容
     product_type_detail = Column(String)  # "web_app" | "agent_skill" | "mcp_service"
     product_endpoint = Column(String)  # 可访问的端点路径
+
+    # OpenClaw Skill 元数据
+    openclaw_skill_id = Column(String, nullable=True)  # 对应的 OpenClaw skill ID
+    openclaw_skill_path = Column(String, nullable=True)  # skill 在 OpenClaw 中的安装路径
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

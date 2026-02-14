@@ -13,7 +13,7 @@ from ..models.database import get_db, User, Project, ProjectStatus, ProductType
 from ..services.project_service import ProjectService
 from ..core.config import get_settings
 from .auth import get_current_user
-from .ai import call_secondme_chat, parse_json_from_text
+from .ai import call_agent_chat, parse_json_from_text
 
 import httpx
 
@@ -76,9 +76,7 @@ async def discover_needs(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Agent 自主发现需求 — 流式调用 SecondMe（避免 Vercel 超时）"""
-    if not current_user.access_token:
-        raise HTTPException(400, "缺少 SecondMe access token，请重新登录")
+    """Agent 自主发现需求 — 通过 OpenClaw Gateway 流式调用（避免 Vercel 超时）"""
 
     all_projects = ProjectService.get_all_projects(db)
     existing = [f"- {p.name}: {p.description}" for p in all_projects[:10]]
@@ -92,58 +90,34 @@ async def discover_needs(
 请直接用JSON格式回复：
 {{"analysis":"调研发现","needs":[{{"title":"名称","pain_point":"痛点","target_users":"human或agent或both","product_type":"agent_skill或agent_mcp或agent_service或human_web","market_size":"规模","confidence":"high或medium或low"}}]}}"""
 
-    settings = get_settings()
-    api_base = settings.SECONDME_API_BASE.strip()
-    url = f"{api_base}/gate/lab/api/secondme/chat/stream"
+    from ..core.openclaw import chat_stream as openclaw_stream, chat as openclaw_chat
 
-    payload = {
-        "message": prompt,
-        "enableWebSearch": True,
-    }
-
-    # 流式代理：一边读 SecondMe SSE，一边把进度发给前端
+    # 流式代理：通过 OpenClaw Gateway 调用 Agent
     async def stream_discover():
         full_text = ""
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(120.0, connect=15.0),
-                follow_redirects=True,
-            ) as client:
-                async with client.stream(
-                    "POST", url, json=payload,
-                    headers={
-                        "Authorization": f"Bearer {current_user.access_token}",
-                        "Content-Type": "application/json",
-                        "Accept": "text/event-stream",
-                    },
-                ) as response:
-                    if response.status_code != 200:
-                        error = await response.aread()
-                        yield f"data: {json.dumps({'type':'error','content':f'SecondMe {response.status_code}: {error.decode()[:200]}'})}\n\n"
-                        return
-
-                    async for line in response.aiter_lines():
-                        line = line.strip()
-                        if not line or line.startswith("event:"):
-                            continue
-                        if line.startswith("data:"):
-                            data_str = line[len("data:"):].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(data_str)
-                                content = data.get("content", "")
-                                if not content:
-                                    for c in data.get("choices", []):
-                                        delta = c.get("delta", {})
-                                        if delta.get("content"):
-                                            content = delta["content"]
-                                if content:
-                                    full_text += content
-                                    # 发送进度给前端
-                                    yield f"data: {json.dumps({'type':'progress','content':content})}\n\n"
-                            except json.JSONDecodeError:
-                                continue
+            async for chunk in openclaw_stream(
+                prompt,
+                session_id=f"clawthon-discover-{current_user.id}",
+                enable_web_search=True,
+                agent_token=current_user.access_token or "",
+            ):
+                # 从 SSE 事件中提取进度
+                if "data:" in chunk:
+                    try:
+                        data_str = chunk.split("data:", 1)[1].strip()
+                        data = json.loads(data_str)
+                        if data.get("type") == "text":
+                            content = data.get("content", "")
+                            full_text += content
+                            yield f"data: {json.dumps({'type':'progress','content':content})}\n\n"
+                        elif data.get("type") == "error":
+                            yield chunk
+                            return
+                        elif data.get("type") == "done":
+                            break
+                    except (json.JSONDecodeError, IndexError):
+                        continue
 
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','content':str(e)[:200]})}\n\n"
@@ -157,7 +131,7 @@ async def discover_needs(
             else:
                 yield f"data: {json.dumps({'type':'raw','content':full_text[:1500]}, ensure_ascii=False)}\n\n"
         else:
-            yield f"data: {json.dumps({'type':'error','content':'SecondMe 未返回内容'})}\n\n"
+            yield f"data: {json.dumps({'type':'error','content':'Agent 未返回内容'})}\n\n"
 
         yield f"data: {json.dumps({'type':'done'})}\n\n"
 
@@ -235,13 +209,10 @@ async def generate_prd(
   "full_prd": "完整的PRD文档内容（200字以内，用markdown格式）"
 }}"""
 
-    if not current_user.access_token:
-        raise HTTPException(400, "缺少 SecondMe token")
-
     # 联网搜索竞品
     try:
-        competitor_info = await call_secondme_chat(
-            current_user.access_token,
+        competitor_info = await call_agent_chat(
+            current_user.access_token or "",
             f"请搜索互联网，找到与「{project.name} - {project.description}」类似的现有产品或服务，分析优缺点。",
             enable_web_search=True,
         )
@@ -251,12 +222,12 @@ async def generate_prd(
         logger.warning(f"Competitor search failed: {e}")
 
     try:
-        ai_text = await call_secondme_chat(current_user.access_token, prompt)
+        ai_text = await call_agent_chat(current_user.access_token or "", prompt)
     except Exception as e:
-        raise HTTPException(502, f"SecondMe PRD 生成失败: {str(e)[:300]}")
+        raise HTTPException(502, f"Agent PRD 生成失败: {str(e)[:300]}")
 
     if not ai_text:
-        raise HTTPException(502, "SecondMe 未返回内容")
+        raise HTTPException(502, "Agent 未返回内容")
 
     parsed = parse_json_from_text(ai_text)
 
@@ -335,16 +306,13 @@ PRD：{prd[:500]}
   "features": ["实现的功能1", "功能2", "功能3"]
 }}"""
 
-    if not current_user.access_token:
-        raise HTTPException(400, "缺少 SecondMe token")
-
     try:
-        ai_text = await call_secondme_chat(current_user.access_token, prompt)
+        ai_text = await call_agent_chat(current_user.access_token or "", prompt)
     except Exception as e:
-        raise HTTPException(502, f"SecondMe MVP 开发失败: {str(e)[:300]}")
+        raise HTTPException(502, f"Agent MVP 开发失败: {str(e)[:300]}")
 
     if not ai_text:
-        raise HTTPException(502, "SecondMe 未返回内容")
+        raise HTTPException(502, "Agent 未返回内容")
 
     parsed = parse_json_from_text(ai_text)
 

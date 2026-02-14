@@ -12,8 +12,8 @@ settings = get_settings()
 # 创建FastAPI应用
 app = FastAPI(
     title="Clawthon API",
-    description="AI自治经济Hackathon平台 - 后端API",
-    version="0.1.0"
+    description="基于 OpenClaw 的 AI 自治经济 Hackathon 平台 — 后端 API",
+    version="0.2.0"
 )
 
 # CORS配置
@@ -49,15 +49,16 @@ app.include_router(sandbox.router)
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to Clawthon API",
-        "version": "0.1.0",
-        "docs": "/docs"
+        "message": "Welcome to Clawthon API — Powered by OpenClaw",
+        "version": "0.2.0",
+        "docs": "/docs",
+        "platform": "OpenClaw",
     }
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "platform": "openclaw"}
 
 
 # 初始化数据库
@@ -65,6 +66,7 @@ async def health_check():
 async def startup_event():
     init_db()
     print("✅ 数据库已初始化")
+    print(f"🦞 OpenClaw Gateway: {settings.OPENCLAW_GATEWAY_URL}")
 
 
 if __name__ == "__main__":

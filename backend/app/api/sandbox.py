@@ -1,9 +1,9 @@
 """
-Product Sandbox — Agent 真实开发的产品在这里运行
+Product Sandbox — Agent 真实开发的产品在这里运行（基于 OpenClaw）
 
 - Web 产品：直接渲染 HTML
-- Agent Skill：通过 POST 调用，传入参数，返回结果
-- MCP 服务：标准化 JSON-RPC 调用
+- OpenClaw Agent Skill：SKILL.md + scripts/ 格式，可安装到 OpenClaw 实例
+- MCP 服务：标准化 JSON-RPC 调用（FastMCP 格式）
 """
 import json
 import logging
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..models.database import Project, User, get_db
 from .auth import get_current_user
-from .ai import call_secondme_chat
+from .ai import call_agent_chat
 
 router = APIRouter(prefix="/sandbox", tags=["Product Sandbox"])
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ async def develop_product_code(
     # - web_app：面向人类，浏览器使用
     # - agent_skill：面向 Agent 的 Skills Layer（知识与逻辑层）—— "怎么做"
     # - mcp_service：面向 Agent 的 MCP Tool Layer（连接与执行层）—— "能做什么"
-    classify_raw = await call_secondme_chat(
+    classify_raw = await call_agent_chat(
         token,
         f"判断项目「{short_name}」（描述：{desc}）应该做成什么类型的产品。\n"
         "三种选择：\n"
@@ -132,11 +132,11 @@ async def develop_product_code(
             "- 如果核心功能需要后端，用 Mock 假数据（至少 5 条真实感的示例数据），标注'📋 Mock 演示'\n"
             "- 不要引用外部 CDN\n"
             "- 不要输出 Python 代码\n"
-            "- 底部：Powered by Clawthon AI Agent\n\n"
+            "- 底部：Powered by Clawthon × OpenClaw\n\n"
             "只输出 HTML，不要解释。"
         )
         for attempt in range(MAX_REACT_ROUNDS):
-            raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+            raw = await call_agent_chat(token, prompt, enable_web_search=False)
             code = _clean_code(raw, "web_app")
             # Verify: must be valid HTML
             cl = (code or "").lower()
@@ -161,9 +161,9 @@ async def develop_product_code(
     # - scripts/：可执行脚本，Claude 运行并只看 stdout
     # - 通过 skill_id 注册，API 用 container 参数加载
     elif product_type == "agent_skill":
-        prompt = f"""为「{short_name}」开发一个 Claude Agent Skill（官方格式）。描述：{desc}
+        prompt = f"""为「{short_name}」开发一个 OpenClaw Agent Skill（官方格式）。描述：{desc}
 
-Claude Agent Skills 是文件系统上的目录结构：
+OpenClaw Agent Skills 是文件系统上的目录结构：
 ```
 {short_name}/
 ├── SKILL.md          # 指令文档（Claude 读取）
@@ -186,7 +186,7 @@ Claude Agent Skills 是文件系统上的目录结构：
 
 只输出 JSON。"""
 
-        raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+        raw = await call_agent_chat(token, prompt, enable_web_search=False)
         skill_data = parse_json_from_text(raw)
 
         skill_id = skill_data.get("skill_id", "skill")
@@ -196,7 +196,7 @@ Claude Agent Skills 是文件系统上的目录结构：
         output_template = skill_data.get("output_template", "# Output\\n\\n{{result}}")
 
         code = f'''# ================================================================
-# Claude Agent Skill: {skill_id}
+# OpenClaw Agent Skill: {skill_id}
 # 官方格式：SKILL.md + scripts/ + templates/
 #
 # 目录结构:
@@ -255,7 +255,7 @@ def export_skill_files() -> dict:
             error = _verify_python_code(code, "execute_skill")
             if not error:
                 break
-            fix_raw = await call_secondme_chat(token, f"脚本有错误：{error}。请只输出修复后的 main.py Python 脚本代码。项目：{short_name}", enable_web_search=False)
+            fix_raw = await call_agent_chat(token, f"脚本有错误：{error}。请只输出修复后的 main.py Python 脚本代码。项目：{short_name}", enable_web_search=False)
             fixed = _clean_code(fix_raw, "agent_skill")
             if fixed:
                 code = code.replace(main_script, fixed)
@@ -319,7 +319,7 @@ if __name__ == "__main__":
     mcp.run(transport="stdio")
 
 # ================================================================
-# 沙盒兼容版（不依赖 mcp 包，可在 Clawthon 沙盒中直接调用）
+# 沙盒兼容版（不依赖 mcp 包，可在 Clawthon/OpenClaw 沙盒中直接调用）
 # ================================================================
 # ... 同样的 tool 函数（不需要装饰器）...
 # TOOLS = {{"tool1": tool1, ...}}
@@ -333,7 +333,7 @@ if __name__ == "__main__":
 - 只输出 Python 代码"""
 
         for attempt in range(MAX_REACT_ROUNDS):
-            raw = await call_secondme_chat(token, prompt, enable_web_search=False)
+            raw = await call_agent_chat(token, prompt, enable_web_search=False)
             code = _clean_code(raw, "mcp_service")
             error = _verify_python_code(code, "handle_request")
             if not error:
@@ -447,7 +447,7 @@ footer{{text-align:center;padding:24px;color:#94a3b8;font-size:12px}}
 <button class="btn" onclick="document.getElementById('result').style.display='block';document.getElementById('result').innerHTML='<strong>✅ 处理完成</strong><br>输入内容已接收（'+document.getElementById('inp').value.length+'字符），Mock 数据已生成。实际产品将接入后端服务处理。'">开始处理</button>
 <div id="result"></div></div>
 </div>
-<footer>Powered by Clawthon AI Agent · {name}</footer>
+<footer>Powered by Clawthon × OpenClaw · {name}</footer>
 </body></html>"""
 
 

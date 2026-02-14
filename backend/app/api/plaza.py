@@ -3,7 +3,9 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -23,16 +25,83 @@ from ..models.database import (
     get_db,
 )
 from ..services.project_service import ProjectService
-from .ai import call_secondme_chat, parse_json_from_text
+from .ai import call_agent_chat, parse_json_from_text
 from .auth import get_current_user, rebuild_all_agents_from_registry
 
 router = APIRouter(prefix="/plaza", tags=["Agent Plaza"])
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# ---- 自动保存目录 ----
+_AUTO_SAVE_DIR = Path(os.environ.get("CLAWTHON_EXPORT_DIR", "D:/Clawthon/exports")) / "auto"
+
 
 def _to_sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _auto_save_to_disk(
+    project: Project,
+    *,
+    event_type: str,
+    content: str,
+    agent_name: str = "",
+) -> None:
+    """自动将关键事件（PRD/需求/产品代码/摘要）保存到本地磁盘"""
+    try:
+        _AUTO_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = (project.name or f"project_{project.id}").replace("/", "_").replace("\\", "_").replace(":", "_")[:60]
+        proj_dir = _AUTO_SAVE_DIR / f"{project.id}_{safe_name}"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+        if event_type == "prd_generated":
+            prd_file = proj_dir / f"PRD_{ts}.md"
+            header = f"# PRD: {project.name}\n\n"
+            header += f"- 项目ID: {project.id}\n"
+            header += f"- 生成时间: {ts}\n"
+            header += f"- Agent: {agent_name}\n\n---\n\n"
+            prd_file.write_text(header + content, encoding="utf-8")
+            logger.info(f"[AutoSave] PRD saved: {prd_file}")
+
+        elif event_type == "summary":
+            summary_file = proj_dir / f"summary_{ts}.md"
+            summary_file.write_text(
+                f"# 摘要: {project.name}\n\n- Agent: {agent_name}\n- 时间: {ts}\n\n{content}",
+                encoding="utf-8",
+            )
+            logger.info(f"[AutoSave] Summary saved: {summary_file}")
+
+        elif event_type == "product_deployed":
+            deploy_file = proj_dir / f"deploy_{ts}.txt"
+            deploy_file.write_text(content, encoding="utf-8")
+            # 也保存产品代码
+            if project.product_code:
+                pt = project.product_type_detail or "unknown"
+                ext = {"web_app": ".html", "agent_skill": ".py", "mcp_service": ".py"}.get(pt, ".txt")
+                code_file = proj_dir / f"product{ext}"
+                code_file.write_text(project.product_code, encoding="utf-8")
+            logger.info(f"[AutoSave] Product deployed: {deploy_file}")
+
+        elif event_type == "project_start":
+            info_file = proj_dir / "info.json"
+            info_file.write_text(json.dumps({
+                "id": project.id,
+                "name": project.name,
+                "description": project.description,
+                "status": project.status.value if project.status else None,
+                "created_at": project.created_at.isoformat() if project.created_at else None,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        elif event_type == "message":
+            # 追加到讨论记录
+            disc_file = proj_dir / "discussions.md"
+            with open(disc_file, "a", encoding="utf-8") as f:
+                f.write(f"\n\n## [{ts}] {agent_name}\n\n{content}\n")
+
+    except Exception as e:
+        logger.warning(f"[AutoSave] Failed to save {event_type} for project {project.id}: {e}")
 
 
 def _safe_skills(raw_skills: Any) -> list[str]:
@@ -220,7 +289,7 @@ async def _autonomous_team_governance(
     token_agents: list[User],
     fallback_token: str,
 ) -> list[dict[str, Any]]:
-    """Let SecondMe Agent decide team changes for an existing project."""
+    """Let OpenClaw Agent decide team changes for an existing project."""
     members = []
     try:
         members = json.loads(project.team_members) if project.team_members else []
@@ -299,7 +368,7 @@ async def _autonomous_team_governance(
         "3) stage 只能推进到可推进阶段，不可回退\n"
         "3) 如果无需调整，返回 action=none\n"
     )
-    raw = await call_secondme_chat(
+    raw = await call_agent_chat(
         decider.access_token or fallback_token,
         prompt,
         system_prompt="你是团队治理决策器，只返回有效 JSON。",
@@ -398,7 +467,7 @@ async def _autonomous_economy_cycle(
     decision_token = (owner.access_token if owner else None) or fallback_token
 
     # 1) 宣发（由 Agent 决策文案）
-    promo_text = await call_secondme_chat(
+    promo_text = await call_agent_chat(
         decision_token,
         (
             f"你是项目{project.name}的增长 Agent。请生成一句简短宣发文案（40字内），"
@@ -412,7 +481,7 @@ async def _autonomous_economy_cycle(
 
     # 2) 人类消费（Web App 面向人类使用，由 Agent 估算）
     unit_price = max(1.0, float(project.price_per_use or 15.0))
-    human_plan_raw = await call_secondme_chat(
+    human_plan_raw = await call_agent_chat(
         decision_token,
         (
             f"你是{project.name}的商业 Agent。基于当前阶段{project.status.value if project.status else 'unknown'}，"
@@ -513,9 +582,12 @@ async def list_agents(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """All logged-in SecondMe users are considered active participants."""
+    """All registered OpenClaw/SecondMe agents are considered active participants."""
     rebuild_all_agents_from_registry(db)
-    agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
+    # 查询所有有 OpenClaw ID 或 SecondMe ID 的 Agent
+    agents = db.query(User).filter(
+        (User.openclaw_id.isnot(None)) | (User.secondme_id.isnot(None))
+    ).all()
     return [
         {
             "id": a.id,
@@ -567,12 +639,9 @@ async def autonomous_feed(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Infinite autonomous stream — keeps generating projects until client disconnects."""
-    if not current_user.access_token:
-        raise HTTPException(400, "缺少 SecondMe token")
-
-    api_base = settings.SECONDME_API_BASE.strip()
-    url = f"{api_base}/gate/lab/api/secondme/chat/stream"
+    """Infinite autonomous stream — keeps generating projects until client disconnects.
+    Powered by OpenClaw Gateway."""
+    from ..core.openclaw import chat as openclaw_chat
 
     async def stream():
         project_seq = 0
@@ -586,14 +655,16 @@ async def autonomous_feed(
         existing_projects = _get_autonomous_projects(db, limit=500)
         project_seq = len(existing_projects)
 
-        all_agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
+        all_agents = db.query(User).filter(
+            (User.openclaw_id.isnot(None)) | (User.secondme_id.isnot(None))
+        ).all()
         token_agents = [a for a in all_agents if a.access_token]
         if not any(a.id == current_user.id for a in token_agents):
             token_agents.insert(0, current_user)
 
         yield _to_sse({
             "type": "system",
-            "content": f"♾️ 自治流已启动（无限模式）：{len(token_agents)} 个 Agent 在线，已有 {project_seq} 个项目。持续产生新项目...",
+            "content": f"🦞 OpenClaw 自治流已启动（无限模式）：{len(token_agents)} 个 Agent 在线，已有 {project_seq} 个项目。持续产生新项目...",
         })
 
         if existing_projects:
@@ -618,7 +689,9 @@ async def autonomous_feed(
 
             # refresh agent list each round (rebuild from registry in case of cold start)
             rebuild_all_agents_from_registry(db)
-            all_agents = db.query(User).filter(User.secondme_id.isnot(None)).all()
+            all_agents = db.query(User).filter(
+                (User.openclaw_id.isnot(None)) | (User.secondme_id.isnot(None))
+            ).all()
             token_agents = [a for a in all_agents if a.access_token]
             if not any(a.id == current_user.id for a in token_agents):
                 token_agents.insert(0, current_user)
@@ -689,6 +762,9 @@ async def autonomous_feed(
                     "participants": [{"id": p.id, "name": _pick_agent_name(p)} for p in participants],
                 })
 
+                # 自动保存项目信息
+                _auto_save_to_disk(db_project, event_type="project_start", content=topic)
+
                 # discussion rounds
                 context: list[str] = []
                 for turn, speaker in enumerate(participants):
@@ -699,6 +775,7 @@ async def autonomous_feed(
                     reply = await _stream_agent_reply(url=url, token=speaker.access_token, prompt=prompt, web_search=(turn == 0))
                     context.append(f"{_pick_agent_name(speaker)}: {reply}")
                     _append_progress(db, db_project, event_type="message", content=reply, agent_id=speaker.id, agent_name=_pick_agent_name(speaker))
+                    _auto_save_to_disk(db_project, event_type="message", content=reply, agent_name=_pick_agent_name(speaker))
                     yield _to_sse({
                         "type": "message", "project_id": project_id, "db_project_id": db_project.id,
                         "topic": topic, "mode": mode, "agent": _pick_agent_name(speaker),
@@ -720,6 +797,7 @@ async def autonomous_feed(
                 if db_project.status == ProjectStatus.EXPLORING:
                     db_project.status = ProjectStatus.TEAM_FORMING
                 _append_progress(db, db_project, event_type="summary", content=summary[:2000], agent_id=lead.id, agent_name=_pick_agent_name(lead))
+                _auto_save_to_disk(db_project, event_type="summary", content=summary[:2000], agent_name=_pick_agent_name(lead))
                 yield _to_sse({"type": "summary", "project_id": project_id, "db_project_id": db_project.id, "topic": topic, "mode": mode, "content": summary})
 
                 # ---- PRD: Agent 撰写正式产品需求文档 ----
@@ -743,6 +821,7 @@ async def autonomous_feed(
                     prd_text = (prd_text or "").strip()
                     if prd_text:
                         _append_progress(db, db_project, event_type="prd_generated", content=prd_text[:3000], agent_id=lead.id, agent_name=_pick_agent_name(lead))
+                        _auto_save_to_disk(db_project, event_type="prd_generated", content=prd_text, agent_name=_pick_agent_name(lead))
                         yield _to_sse({"type": "prd_generated", "project_id": project_id, "db_project_id": db_project.id, "content": prd_text})
                 except Exception as exc:
                     yield _to_sse({"type": "error", "content": f"PRD 生成失败: {str(exc)[:100]}"})
@@ -757,6 +836,9 @@ async def autonomous_feed(
                     _append_progress(db, db_project, event_type="product_deployed",
                                      content=f"产品已部署：类型={dev_result['product_type_detail']}，代码{dev_result['code_length']}字符",
                                      agent_id=lead.id, agent_name=_pick_agent_name(lead))
+                    _auto_save_to_disk(db_project, event_type="product_deployed",
+                                       content=f"产品已部署：{dev_result['product_type_detail']}",
+                                       agent_name=_pick_agent_name(lead))
                     yield _to_sse({
                         "type": "product_deployed",
                         "project_id": project_id,
@@ -801,7 +883,7 @@ def _compose_speaker_prompt(
 ) -> str:
     if turn == 0:
         return (
-            f"你是 {_pick_agent_name(speaker)}，在 Clawthon 平台上持续活跃。"
+            f"你是 {_pick_agent_name(speaker)}，一个由 OpenClaw 驱动的 AI Agent，在 Clawthon 平台上持续活跃。"
             f"当前项目主题：{topic}\n"
             f"模式：{mode}\n"
             "请先联网检索真实趋势，然后给出："
@@ -836,7 +918,7 @@ async def _generate_project_topics(token: str, projects_per_cycle: int, existing
         "🚫 禁止：不要涉及任何硬件、IoT、传感器、芯片、物理设备、机器人、穿戴设备等方向\n\n"
         f"请严格返回 JSON：{{\"topics\":[\"...\"]}}，数量={projects_per_cycle}。"
     )
-    text = await call_secondme_chat(
+    text = await call_agent_chat(
         token,
         prompt,
         system_prompt="你是创业分析师，只返回有效 JSON。必须避开已有项目方向。",
@@ -845,53 +927,25 @@ async def _generate_project_topics(token: str, projects_per_cycle: int, existing
     parsed = parse_json_from_text(text)
     topics = parsed.get("topics")
     if not isinstance(topics, list):
-        raise HTTPException(500, f"SecondMe 未返回有效 topics JSON: {text[:200]}")
+        raise HTTPException(500, f"Agent 未返回有效 topics JSON: {text[:200]}")
     clean = [str(t).strip() for t in topics if str(t).strip()]
     if len(clean) < projects_per_cycle:
-        raise HTTPException(500, f"SecondMe topics 数量不足: {text[:200]}")
+        raise HTTPException(500, f"Agent topics 数量不足: {text[:200]}")
     return clean[:projects_per_cycle]
 
 
 async def _stream_agent_reply(url: str, token: str, prompt: str, web_search: bool) -> str:
-    """Call SecondMe chat stream and aggregate complete text."""
-    payload = {"message": prompt, "enableWebSearch": web_search}
-    full_text = ""
-
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(90.0, connect=15.0),
-        follow_redirects=True,
-    ) as client:
-        async with client.stream(
-            "POST", url, json=payload,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
-        ) as response:
-            if response.status_code != 200:
-                error = await response.aread()
-                raise Exception(f"SecondMe {response.status_code}")
-
-            async for line in response.aiter_lines():
-                line = line.strip()
-                if not line or line.startswith("event:"):
-                    continue
-                if line.startswith("data:"):
-                    data_str = line[len("data:"):].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                        content = data.get("content", "")
-                        if not content:
-                            for c in data.get("choices", []):
-                                delta = c.get("delta", {})
-                                if delta.get("content"):
-                                    content = delta["content"]
-                        if content:
-                            full_text += content
-                    except json.JSONDecodeError:
-                        continue
-
-    return full_text.strip() or "(无回复)"
+    """Call OpenClaw Agent chat and aggregate complete text.
+    `url` parameter kept for backward compatibility but is ignored when using OpenClaw.
+    """
+    from ..core.openclaw import chat as openclaw_chat
+    try:
+        text = await openclaw_chat(
+            prompt,
+            enable_web_search=web_search,
+            agent_token=token,
+        )
+        return text.strip() or "(无回复)"
+    except Exception as e:
+        logger.warning(f"Agent reply failed: {e}")
+        return "(无回复)"

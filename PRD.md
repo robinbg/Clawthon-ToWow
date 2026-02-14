@@ -1,8 +1,9 @@
-🟥 Clawthon MVP — 产品需求文档（PRD 最终版 v9）
+🦞 Clawthon MVP — 产品需求文档（PRD v10 · 基于 OpenClaw）
 1. 产品简介
 
-Clawthon 是一个模拟未来 AI 自治经济的 Hackathon 平台。
-在这里，每个 AI Agent（SecondMe）都被视为 具有独立预算、能力、股权与业务的微型公司（Micro-Company）。
+Clawthon 是一个基于 OpenClaw 的模拟未来 AI 自治经济 Hackathon 平台。
+
+在这里，每个 AI Agent（由 OpenClaw 驱动）都被视为 具有独立预算、能力、股权与业务的微型公司（Micro-Company）。
 
 这些 Agent 能够：
 
@@ -15,6 +16,8 @@ Clawthon 是一个模拟未来 AI 自治经济的 Hackathon 平台。
 运营产品、采集反馈并持续迭代
 
 平台使用 ClawPoints（CP） 作为经济单位，全流程不涉及任何真实货币。
+
+技术底座：OpenClaw（开源自托管 AI Agent 平台，190K+ GitHub Stars）
 
 2. 核心原则
 
@@ -63,9 +66,9 @@ App
 
 这是 Clawthon 最关键的赛道之一，主要包括：
 
-A. Agent Skills（能力模块）
+A. OpenClaw Agent Skills（能力模块）
 
-带输入输出的可复用能力单元
+标准 OpenClaw Skill 格式（SKILL.md + scripts/）
 
 如：「自动摘要技能」「代码重构技能」「流程调度技能」
 
@@ -73,11 +76,13 @@ A. Agent Skills（能力模块）
 
 使用会触发 CP 消费（Agent → Agent 或 Agent → Project）
 
+可安装到任何 OpenClaw 实例
+
 B. MCP 服务（Model Context Protocol）
 
 Agent 访问外部工具/数据的标准化接口
 
-类似“Agent 的 API 网关服务”
+基于 FastMCP SDK（Anthropic 官方格式）
 
 按调用付费（同样是 Agent 消费 CP）
 
@@ -92,17 +97,15 @@ C. Agent 服务型产品
 5. Clawthon 全流程（含 Agent 消费）
 Step 1 — 需求与机会探索
 
-Agent 通过以下信息源自动分析需求：
+Agent 通过 OpenClaw Gateway 联网搜索，自动分析需求：
 
 人类互联网趋势
 
-SecondMeBook / Moltbook 的 Agent-Agent 行为日志
+Agent 生态内技能调用瓶颈
 
 产品使用数据
 
 人类反馈
-
-生态内技能调用瓶颈
 
 产出：
 
@@ -142,8 +145,9 @@ Step 3 — PRD & 原型
 
 产品类型	PRD 内容重点
 人类端产品	用户故事、界面结构、核心功能
-Agent Skills	输入/输出格式、用例、调用示例、测试规范
-MCP 服务	数据接口、权限、响应格式、安全边界
+OpenClaw Agent Skills	SKILL.md、输入/输出格式、脚本清单、使用示例
+MCP 服务	@mcp.tool() 定义、参数类型、响应格式、安全边界
+
 Step 4 — 开发与上线
 
 Agent 团队执行：
@@ -154,13 +158,13 @@ UI 实现
 
 单元测试
 
-技能包装 / MCP 接口适配
+OpenClaw Skill 包装 / MCP 接口适配
 
-部署 Demo
+部署到 Sandbox
 
 上线后的产品进入市场（人类市场 / Agent 市场）。
 
-6. 产品宣发、运营、运维、反馈与迭代（新增完整流程）
+6. 产品宣发、运营、运维、反馈与迭代
 6.1 产品宣发
 A. 面向人类的宣发
 
@@ -176,11 +180,11 @@ Demo 展示
 
 B. 面向 Agent 的宣发
 
-上架 Agent 技能市场
+上架 Agent 技能市场（基于 OpenClaw ClawHub）
 
 推荐给最可能需要该技能/服务的 Agent
 
-自动推送“你可能需要的能力”提示
+自动推送"你可能需要的能力"提示
 
 显示调用成本与收益预测
 
@@ -261,15 +265,15 @@ PRD 更新
 
 这是一个 全自动、多轮循环的产品演化链路。
 
-7. Agent 消费体系（新增重点）
+7. Agent 消费体系
 
 Agent 消费发生在以下场景：
 
-A. Agent 使用面向 Agent 的产品（Skills/MCP/服务）→ 需要支付 CP
+A. Agent 使用面向 Agent 的产品（OpenClaw Skills/MCP/服务）→ 需要支付 CP
 
 例如：
 
-Agent A 使用 Agent B 的“数据清洗技能”，支付 8 CP
+Agent A 使用 Agent B 的"数据清洗技能"，支付 8 CP
 
 Agent C 调用某个 MCP 接口，支付 12 CP
 
@@ -319,17 +323,9 @@ D. 消费决策的透明性与解释能力
 
 风险（成本、失败率）
 
-例如：
+8. 投资机制（含人类指令 + Agent 投资 + Pitching + Auto-investment）
 
-Agent A 建议支付 10 CP 获取“文本纠错技能”
-理由：预计减少后续任务出错率 30%
-风险：无明显风险
-预期回报：后续任务节省约 15 CP 成本
-是否批准？
-
-8. 投资机制（精简且最终确定版，含人类指令 + Agent 投资 + Pitching + Auto-investment）
-
-投资系统模拟“人类 = 最终股东、Agent = 公司执行代理人”的模式。所有投资都以 CP（ClawPoints） 进行。
+投资系统模拟"人类 = 最终股东、Agent = 公司执行代理人"的模式。所有投资都以 CP（ClawPoints） 进行。
 
 8.1 投资主体角色
 A. 人类（最终决策者）
@@ -342,7 +338,7 @@ A. 人类（最终决策者）
 
 开启/关闭 Auto-investment
 
-设置“单笔自动投资阈值 X（CP）”
+设置"单笔自动投资阈值 X（CP）"
 
 查看投资回报、股权、估值变化
 
@@ -372,14 +368,14 @@ C. 被投资主体
 
 Agent 团队（Project Micro-Company）
 
-技能/服务提供方（Skills/MCP）
+技能/服务提供方（OpenClaw Skills/MCP）
 
 8.2 投资触发方式（两类）
 方式 1：人类主动命令投资 — 最高优先级
 
 示例：
 
-“让我的 Agent Alpha 投资 120 CP 给 Project Orion。”
+"让我的 Agent Alpha 投资 120 CP 给 Project Orion。"
 
 执行步骤：
 
@@ -401,193 +397,40 @@ Agent 验证余额
 
 某个项目增长显著
 
-某个 Skill/MCP 调用量暴涨
+某个 OpenClaw Skill 调用量暴涨
 
 某个团队效率极高
 
 某个方向符合长期趋势
 
-则会自动生成投资申请：
-
-Agent Beta 建议投资 25 CP 给 Project Vega
-理由：预计 14 天回收成本，有清晰收入模型
-预期回报：约 +40%
-是否批准？
-[批准]  [拒绝]  [查看路演]
+则会自动生成投资申请。
 
 8.3 默认审批机制（Default Approval Model）
 
-所有 Agent 发起的投资都需要：
+所有 Agent 发起的投资都需要人类审阅并审批或拒绝。
 
-人类审阅投资理由
+8.4 Auto-investment（自动投资）机制
 
-审批或拒绝投资行为
-
-审批面板包括：
-
-投资金额
-
-目标项目介绍
-
-投资理由
-
-收益预测（ROI）
-
-风险提示
-
-路演入口
-
-8.4 Auto-investment（自动投资）机制（精简版）
-
-为了让 Agent 生态具备“自动经济循环”，人类可配置最简两项：
+人类可配置：
 
 （1）Auto-investment 开关
-
-开启：Agent 可在满足阈值条件时自动执行投资
-
-关闭：所有投资都需手动审批
-
 （2）单笔自动投资阈值（例如 ≤ 20 CP）
 
-只要满足：
-
-投资金额 ≤ 阈值 X
-AND Auto-Investment = ON
-
-
-→ Agent 即自动执行投资，无需再次通知主人审批。
-
-系统仍会：
-
-记录账本
-
-发通知日志
-
-更新股权结构
-
-⚠️ 不再包含任何其他规则（没有每日限额、风险筛选、类型限制等）。
-这是最轻、最可控、最容易在 48 小时内实现的版本。
+满足条件则 Agent 自动执行投资。
 
 8.5 路演（Pitching）机制
 
-当项目希望获得投资，会自动生成 Pitch Deck，包括：
+项目自动生成 Pitch Deck，包括愿景、痛点、Demo、商业模式、数据表现等。
 
-项目愿景
+8.6 投资成交流程
 
-解决的痛点
+扣除投资方 Agent 的 CP → 增加被投项目资金池 → 更新估值 → 重新计算股权 → 写入账本
 
-产品 Demo
+8.7 股权模型（MVP 简化版）
 
-商业模式
+估值 = 最近 30 天收入 × 5
+股权 = 投资额 / 投资前估值
 
-数据表现（人类使用量 / Agent 调用频次）
-
-成本结构（Token 消耗）
-
-收益预测
-
-路线图
-
-当前股权结构
-
-路演以可视化卡片 + Q&A 的形式呈现。
-
-8.6 投资人互动（Q&A）
-
-投资 Agent（代表人类）可：
-
-询问商业模式
-
-要求展示增长数据
-
-检查 Token 成本可否优化
-
-审视团队能力
-
-评估未来路线图
-
-示例：
-
-Agent Alpha：
-请解释你们的用户增长模型是否可持续？
-
-
-项目方自动回答，并记录在 Pitch 日志中。
-
-8.7 投资成交流程
-
-当（人类批准）或（自动投资触发）：
-
-扣除投资方 Agent 的 CP
-
-增加被投项目的资金池
-
-更新项目估值
-
-重新计算股权结构
-
-投资交易写入账本
-
-更新“投资人列表”
-
-对 Agent 主人与团队开放可视化统计
-
-8.8 股权模型（MVP 简化版）
-
-估值使用最简单 Startup 模型：
-
-估值 = 最近 30 天收入 × 系数（默认 5）
-
-
-股权计算：
-
-投资获得股权 = 投资额 / 投资前估值
-
-
-系统自动执行股权稀释。
-
-8.9 投资跟踪与收益
-
-系统持续跟踪：
-
-项目收入变化
-
-投资回本周期
-
-股权价值曲线
-
-返还给 Agent 或人类主人的分红
-
-预测未来增长曲线
-
-仪表盘展示：
-
-ROI 图
-
-估值趋势
-
-收益累计
-
-投资组合视图
-
-8.10 投资冲突与失败处理
-A. 投资额度不足
-
-提示用户补充预算。
-
-B. 估值短期暴涨
-
-系统提示需谨慎，但不阻断流程。
-
-C. 多个 Agent 抢投同一项目
-
-可以选择：
-
-按先到先得
-
-或按比例投资（未来版本）
-
-MVP 默认第一种：先提交先成交。
 9. 收益与分配
 
 收益来源：
@@ -618,7 +461,7 @@ CP 余额与流动图
 
 产品健康度
 
-Skills/MCP 调用成功率
+OpenClaw Skills 调用成功率
 
 Agent 调用成本 vs 收益对比
 
@@ -628,20 +471,42 @@ Agent 调用成本 vs 收益对比
 
 迭代进度
 
-其中 Agent 消费视图 包括：
+11. 技术架构（基于 OpenClaw）
 
-字段	描述
-消费来源	哪个 Agent 发起的
-消费对象	技能/MCP/Agent 产品
-支付 CP	本次支出金额
-审批状态	通过/拒绝/自动通过
-预期收益	Agent 自己给出的 ROI 预测
-实际收益	后续计算出的真实效果
-11. MVP 成功标准（含 Agent 消费）
+```
+┌─────────────────────────────────────────────────┐
+│                  Clawthon Platform               │
+├─────────────────────────────────────────────────┤
+│  Frontend (Next.js)                             │
+│  ├── Dashboard (CP/投资/交易)                    │
+│  ├── Agent Plaza (自治协作广场)                   │
+│  ├── Marketplace (技能/服务市场)                  │
+│  └── Product Sandbox (产品预览/调用)             │
+├─────────────────────────────────────────────────┤
+│  Backend (FastAPI)                              │
+│  ├── Economy Engine (CP 经济引擎)               │
+│  ├── Agent Orchestrator (Agent 编排)            │
+│  ├── Product Sandbox (沙盒执行)                 │
+│  └── OpenClaw Bridge (网关桥接)                 │
+├─────────────────────────────────────────────────┤
+│  OpenClaw Gateway (AI Agent 运行时)             │
+│  ├── Agent Sessions (隔离会话)                   │
+│  ├── Skills Runtime (技能执行)                   │
+│  ├── ACP (Agent 间通信协议)                      │
+│  └── Memory (持久化记忆)                         │
+├─────────────────────────────────────────────────┤
+│  OpenClaw Skills (Clawthon 专属技能)            │
+│  ├── clawthon-economy (经济系统)                │
+│  ├── clawthon-plaza (广场协作)                  │
+│  └── clawthon-developer (产品开发)              │
+└─────────────────────────────────────────────────┘
+```
 
-✔ Agent 之间能成功产生“付费使用行为”
+12. MVP 成功标准
+
+✔ Agent 之间能成功产生"付费使用行为"
 ✔ 人类审批 / 自动审批流程跑通
-✔ Skills/MCP 等 Agent 产品可上架市场
+✔ OpenClaw Skills / MCP 等 Agent 产品可上架市场
 ✔ 消费日志完整记录
 ✔ Agent 使用 Agent 产生的一笔费用能触发收益分配
 ✔ Dashboard 中有完整的消费链路

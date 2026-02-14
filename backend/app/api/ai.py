@@ -1,5 +1,10 @@
 """
-AI 辅助决策接口 —— 调用 SecondMe Chat API 自动生成消费/投资理由
+AI 辅助决策接口 —— 通过 OpenClaw Gateway 调用 Agent 生成消费/投资理由
+
+架构说明:
+- 优先使用 OpenClaw Gateway（本地部署的 AI Agent 平台）
+- 兼容 SecondMe API（过渡期）
+- 统一的 call_agent_chat / parse_json_from_text 供其他模块调用
 """
 import json
 import logging
@@ -11,9 +16,8 @@ from typing import Optional
 from ..models.database import get_db, User, Project
 from ..services.project_service import ProjectService
 from ..core.config import get_settings
+from ..core.openclaw import chat as openclaw_chat
 from .auth import get_current_user
-
-import httpx
 
 router = APIRouter(prefix="/ai", tags=["AI决策"])
 logger = logging.getLogger(__name__)
@@ -43,79 +47,31 @@ class AIInvestDecision(BaseModel):
     recommended_action: str
 
 
-async def call_secondme_chat(
-    access_token: str,
+async def call_agent_chat(
+    agent_token: str,
     prompt: str,
     enable_web_search: bool = False,
     system_prompt: str = "",
+    session_id: Optional[str] = None,
 ) -> str:
     """
-    调用 SecondMe Chat Stream API，收集完整回复。
-    enable_web_search=True 时 Agent 会真实搜索互联网。
+    统一的 Agent 聊天接口 — 通过 OpenClaw Gateway 或 SecondMe API。
+
+    优先级:
+    1. OpenClaw Gateway（如果配置了 OPENCLAW_API_KEY）
+    2. SecondMe API（如果有 agent_token 且配置了 SECONDME_API_BASE）
     """
-    api_base = settings.SECONDME_API_BASE.strip()
-    url = f"{api_base}/gate/lab/api/secondme/chat/stream"
+    return await openclaw_chat(
+        prompt,
+        session_id=session_id,
+        system_prompt=system_prompt,
+        enable_web_search=enable_web_search,
+        agent_token=agent_token,
+    )
 
-    # 官方文档: POST /api/secondme/chat/stream
-    # { "message": "string", "systemPrompt": "string", "enableWebSearch": bool }
-    payload: dict = {
-        "message": prompt,
-        "enableWebSearch": enable_web_search,
-    }
-    if system_prompt:
-        payload["systemPrompt"] = system_prompt
 
-    logger.info(f"SecondMe chat: web_search={enable_web_search}, prompt={prompt[:80]}...")
-
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0, connect=15.0),
-            follow_redirects=True,
-        ) as client:
-            full_text = ""
-            async with client.stream(
-                "POST",
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream",
-                },
-            ) as response:
-                if response.status_code != 200:
-                    error_body = await response.aread()
-                    error_text = error_body.decode("utf-8", errors="replace")[:500]
-                    logger.error(f"SecondMe chat error: {response.status_code} {error_text}")
-                    raise Exception(f"SecondMe API {response.status_code}: {error_text}")
-
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line or line.startswith("event:"):
-                        continue
-                    if line.startswith("data:"):
-                        data_str = line[len("data:"):].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            # 兼容多种 SSE 返回格式
-                            content = data.get("content", "")
-                            if content:
-                                full_text += content
-                            for c in data.get("choices", []):
-                                delta = c.get("delta", {})
-                                if delta.get("content"):
-                                    full_text += delta["content"]
-                        except json.JSONDecodeError:
-                            continue
-
-            logger.info(f"SecondMe chat reply length: {len(full_text)}")
-            return full_text.strip()
-
-    except Exception as e:
-        logger.error(f"SecondMe chat call failed: {e}")
-        raise
+# 保持旧函数名的向后兼容
+call_secondme_chat = call_agent_chat
 
 
 def parse_json_from_text(text: str) -> dict:
@@ -162,7 +118,7 @@ async def generate_spend_reason(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """让 SecondMe AI 生成消费理由和预期收益"""
+    """让 OpenClaw Agent 生成消费理由和预期收益"""
     project = ProjectService.get_project_by_id(db, req.target_project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -186,14 +142,20 @@ async def generate_spend_reason(
 请用 JSON 格式回复（不要其他内容）：
 {{"reason": "使用该服务的理由（30字以内）", "expected_return": "预期收益说明（30字以内）", "risk": "风险评估（20字以内）", "recommended_action": "approve 或 reject 或 cautious"}}"""
 
-    # 尝试调用 SecondMe AI
+    # 通过 OpenClaw 调用 Agent
     ai_text = ""
-    if current_user.access_token:
-        ai_text = await call_secondme_chat(current_user.access_token, prompt)
+    try:
+        ai_text = await call_agent_chat(
+            current_user.access_token or "",
+            prompt,
+            session_id=f"clawthon-spend-{current_user.id}",
+        )
+    except Exception as e:
+        logger.warning(f"Agent chat failed: {e}")
 
     parsed = parse_json_from_text(ai_text) if ai_text else {}
 
-    # 如果 AI 没返回有效结果，用规则生成
+    # 如果 Agent 没返回有效结果，用规则生成
     if not parsed.get("reason"):
         roi_estimate = project.usage_count * 0.5 if project.usage_count else 1.0
         is_affordable = current_user.budget >= project.price_per_use * 3
@@ -214,7 +176,7 @@ async def generate_invest_reason(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """让 SecondMe AI 生成投资建议"""
+    """让 OpenClaw Agent 生成投资建议"""
     project = ProjectService.get_project_by_id(db, req.project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -242,8 +204,14 @@ async def generate_invest_reason(
 {{"reason": "投资理由（40字以内）", "expected_roi": 预期回报率数字（如20表示20%）, "risk_level": "low 或 medium 或 high", "recommended_action": "approve 或 reject 或 cautious"}}"""
 
     ai_text = ""
-    if current_user.access_token:
-        ai_text = await call_secondme_chat(current_user.access_token, prompt)
+    try:
+        ai_text = await call_agent_chat(
+            current_user.access_token or "",
+            prompt,
+            session_id=f"clawthon-invest-{current_user.id}",
+        )
+    except Exception as e:
+        logger.warning(f"Agent chat failed: {e}")
 
     parsed = parse_json_from_text(ai_text) if ai_text else {}
 

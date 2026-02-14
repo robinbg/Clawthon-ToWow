@@ -4,7 +4,13 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     """应用配置"""
-    # SecondMe OAuth2
+    # OpenClaw Gateway
+    OPENCLAW_GATEWAY_URL: str = "http://localhost:4767"  # OpenClaw 默认网关地址
+    OPENCLAW_API_KEY: str = ""  # OpenClaw API 密钥
+    OPENCLAW_MODEL: str = "claude-sonnet-4-20250514"  # 默认模型
+    OPENCLAW_SESSION_PREFIX: str = "clawthon"  # 会话前缀
+
+    # 兼容旧版 SecondMe（迁移期间可同时配置）
     SECONDME_CLIENT_ID: str = ""
     SECONDME_CLIENT_SECRET: str = ""
     SECONDME_REDIRECT_URI: str = "http://localhost:3000/api/auth/callback"
